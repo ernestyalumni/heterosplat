@@ -27,6 +27,7 @@ import sys
 
 import torch
 from gsplat.cuda._wrapper import (
+    isect_tiles,
     quat_scale_to_covar_preci,
     spherical_harmonics,
 )
@@ -35,6 +36,20 @@ from gsplat.cuda._wrapper import (
 def write_float_tensor(path: str, tensor: torch.Tensor) -> None:
     """Write a CUDA/CPU tensor as raw little-endian float32 to disk."""
     array = tensor.detach().cpu().contiguous().to(torch.float32).numpy()
+    with open(path, "wb") as f:
+        f.write(array.tobytes())
+
+
+def write_int32_tensor(path: str, tensor: torch.Tensor) -> None:
+    """Write a CUDA/CPU tensor as raw little-endian int32 to disk."""
+    array = tensor.detach().cpu().contiguous().to(torch.int32).numpy()
+    with open(path, "wb") as f:
+        f.write(array.tobytes())
+
+
+def write_int64_tensor(path: str, tensor: torch.Tensor) -> None:
+    """Write a CUDA/CPU tensor as raw little-endian int64 to disk."""
+    array = tensor.detach().cpu().contiguous().to(torch.int64).numpy()
     with open(path, "wb") as f:
         f.write(array.tobytes())
 
@@ -175,6 +190,84 @@ def capture_spherical_harmonics(out_dir: str, number_of_gaussians: int = 64,
           f"L={sh_degree} -> {out_dir}")
 
 
+def capture_intersect_tile(out_dir: str, seed: int = 42) -> None:
+    """Forward fixture for intersect_tile with unsorted raw-kernel output."""
+    os.makedirs(out_dir, exist_ok=True)
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    number_of_images = 2
+    number_of_gaussians = 6
+    tile_size = 8
+    tile_width = 5
+    tile_height = 4
+
+    means2d = torch.rand(
+        number_of_images, number_of_gaussians, 2,
+        generator=generator, device="cuda", dtype=torch.float32)
+    means2d[..., 0] *= tile_width * tile_size
+    means2d[..., 1] *= tile_height * tile_size
+
+    radii = torch.randint(
+        1, 8, (number_of_images, number_of_gaussians, 2),
+        generator=generator, device="cuda", dtype=torch.int32)
+    # Exercise the zero-radius cull path.
+    radii[0, 1, 0] = 0
+
+    depths = (
+        torch.rand(
+            number_of_images, number_of_gaussians,
+            generator=generator, device="cuda", dtype=torch.float32) * 4.0
+        + 0.25)
+
+    tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
+        means2d,
+        radii,
+        depths,
+        tile_size=tile_size,
+        tile_width=tile_width,
+        tile_height=tile_height,
+        sort=False,
+        segmented=False,
+        packed=False,
+        conics=None,
+        opacities=None)
+    cum_tiles_per_gauss = torch.cumsum(tiles_per_gauss.reshape(-1), 0)
+
+    write_uint32(os.path.join(out_dir, "I.bin"), number_of_images)
+    write_uint32(os.path.join(out_dir, "N.bin"), number_of_gaussians)
+    write_uint32(os.path.join(out_dir, "tile_size.bin"), tile_size)
+    write_uint32(os.path.join(out_dir, "tile_width.bin"), tile_width)
+    write_uint32(os.path.join(out_dir, "tile_height.bin"), tile_height)
+    write_uint32(os.path.join(out_dir, "n_isects.bin"), isect_ids.numel())
+    write_float_tensor(os.path.join(out_dir, "means2d.bin"), means2d)
+    write_int32_tensor(os.path.join(out_dir, "radii.bin"), radii)
+    write_float_tensor(os.path.join(out_dir, "depths.bin"), depths)
+    write_int32_tensor(os.path.join(out_dir, "tiles_per_gauss.bin"), tiles_per_gauss)
+    write_int64_tensor(os.path.join(out_dir, "cum_tiles_per_gauss.bin"), cum_tiles_per_gauss)
+    write_int64_tensor(os.path.join(out_dir, "isect_ids.bin"), isect_ids)
+    write_int32_tensor(os.path.join(out_dir, "flatten_ids.bin"), flatten_ids)
+
+    with open(os.path.join(out_dir, "README.md"), "w") as f:
+        f.write(
+            "# IntersectTile oracle fixture\n\n"
+            f"Captured by `Scripts/CaptureGsplatOracle.py` with `seed={seed}`,\n"
+            "gsplat upstream commit 53f89aa58fdbe6bf1b442975e1e4b7d5411e94e5,\n"
+            "and `sort=False`, `packed=False`, `conics=None`, `opacities=None`.\n\n"
+            "All float buffers are raw little-endian float32. Integer buffers\n"
+            "are raw little-endian int32 or int64 as implied by filename;\n"
+            "shape scalars are little-endian uint32. Shapes:\n\n"
+            f"- `means2d`             [{number_of_images}, {number_of_gaussians}, 2]\n"
+            f"- `radii`               [{number_of_images}, {number_of_gaussians}, 2]\n"
+            f"- `depths`              [{number_of_images}, {number_of_gaussians}]\n"
+            f"- `tiles_per_gauss`     [{number_of_images}, {number_of_gaussians}]\n"
+            f"- `cum_tiles_per_gauss` [{number_of_images * number_of_gaussians}]\n"
+            "- `isect_ids`           [n_isects]\n"
+            "- `flatten_ids`         [n_isects]\n")
+
+    print(f"  wrote IntersectTile fixture: I={number_of_images} "
+          f"N={number_of_gaussians} n_isects={isect_ids.numel()} -> {out_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output_root",
@@ -196,6 +289,9 @@ def main() -> int:
         seed=args.seed)
     capture_spherical_harmonics(
         os.path.join(args.output_root, "SphericalHarmonics"),
+        seed=args.seed)
+    capture_intersect_tile(
+        os.path.join(args.output_root, "IntersectTile"),
         seed=args.seed)
 
     print("==> done")

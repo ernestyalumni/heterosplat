@@ -45,11 +45,24 @@ SphericalHarmonicsKernels.cuh (NEW)
     atomicAdd for the float case used here, so the substitution is
     bit-equivalent.
 
+IntersectTileKernels.cuh (NEW)
+  - Extracted the AccuTile/SNUGBOX device helpers and the templated
+    intersect_tile_kernel from gsplat's IntersectTile.cu.
+  - Dropped the ATen launch_intersect_tile_kernel host wrapper,
+    AT_DISPATCH_FLOATING_TYPES dispatch, CUB radix-sort helpers, and
+    intersect_offset kernel. heterosplat owns the raw-pointer launcher in
+    CUDA/Heterosplat/Source/Kernels/Heterosplat/IntersectTile.cu and keeps
+    sorting/prefix-sum storage explicit at the caller boundary.
+
 Files NOT vendored from upstream
 --------------------------------
 
   - QuatScaleToCovar.cpp / QuatScaleToCovar.h (torch boundary; replaced).
   - QuatScaleToCovarCUDA.cu's launch_* host functions (replaced).
+  - Intersect.cpp / Intersect.h (torch boundary; replaced).
+  - IntersectTile.cu's launch_* host function, CUB radix-sort helpers, and
+    intersect_offset kernel (replaced or scheduled as separate raw-pointer
+    slices).
   - 2DGS / 3DGUT / lidar / external-distortion / camera-wrappers kernels
     (out of scope for heterosplat — see PLAN.md done-criteria).
 

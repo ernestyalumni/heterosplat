@@ -2,6 +2,8 @@ ENABLE_TESTING()
 
 ADD_EXECUTABLE(Check
   Core/Tensor_tests.cu
+  Kernels/Heterosplat/IntersectTile_tests.cu
+  Kernels/Heterosplat/IntersectTile_oracle_tests.cu
   Kernels/Heterosplat/QuatScaleToCovar_tests.cu
   Kernels/Heterosplat/QuatScaleToCovar_oracle_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_tests.cu

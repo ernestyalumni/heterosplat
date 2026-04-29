@@ -2,6 +2,7 @@
 # a raw-pointer (const float*, ..., cudaStream_t) launcher here. No at::Tensor.
 
 ADD_LIBRARY(HeterosplatKernels
+  IntersectTile.cu
   QuatScaleToCovar.cu
   SphericalHarmonics.cu
   )

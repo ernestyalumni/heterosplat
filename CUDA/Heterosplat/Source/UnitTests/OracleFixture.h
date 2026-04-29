@@ -60,6 +60,68 @@ inline std::vector<float> load_floats(const std::string& path)
 }
 
 //------------------------------------------------------------------------------
+/// Read raw little-endian int32 array from disk.
+//------------------------------------------------------------------------------
+inline std::vector<std::int32_t> load_int32s(const std::string& path)
+{
+  std::ifstream input{path, std::ios::binary | std::ios::ate};
+  if (!input)
+  {
+    throw std::runtime_error{"OracleFixture: cannot open " + path};
+  }
+  const std::streamsize size_bytes {input.tellg()};
+  if (size_bytes < 0 ||
+      (size_bytes % static_cast<std::streamsize>(sizeof(std::int32_t))) != 0)
+  {
+    throw std::runtime_error{
+      "OracleFixture: invalid int32 file size: " + path};
+  }
+  input.seekg(0, std::ios::beg);
+
+  const std::size_t count {
+    static_cast<std::size_t>(size_bytes) / sizeof(std::int32_t)};
+  std::vector<std::int32_t> result(count);
+  if (!input.read(
+        reinterpret_cast<char*>(result.data()),
+        static_cast<std::streamsize>(count * sizeof(std::int32_t))))
+  {
+    throw std::runtime_error{"OracleFixture: read failed: " + path};
+  }
+  return result;
+}
+
+//------------------------------------------------------------------------------
+/// Read raw little-endian int64 array from disk.
+//------------------------------------------------------------------------------
+inline std::vector<std::int64_t> load_int64s(const std::string& path)
+{
+  std::ifstream input{path, std::ios::binary | std::ios::ate};
+  if (!input)
+  {
+    throw std::runtime_error{"OracleFixture: cannot open " + path};
+  }
+  const std::streamsize size_bytes {input.tellg()};
+  if (size_bytes < 0 ||
+      (size_bytes % static_cast<std::streamsize>(sizeof(std::int64_t))) != 0)
+  {
+    throw std::runtime_error{
+      "OracleFixture: invalid int64 file size: " + path};
+  }
+  input.seekg(0, std::ios::beg);
+
+  const std::size_t count {
+    static_cast<std::size_t>(size_bytes) / sizeof(std::int64_t)};
+  std::vector<std::int64_t> result(count);
+  if (!input.read(
+        reinterpret_cast<char*>(result.data()),
+        static_cast<std::streamsize>(count * sizeof(std::int64_t))))
+  {
+    throw std::runtime_error{"OracleFixture: read failed: " + path};
+  }
+  return result;
+}
+
+//------------------------------------------------------------------------------
 /// Read a single little-endian uint32 (used for shape scalars N, K, degree).
 //------------------------------------------------------------------------------
 inline std::uint32_t load_uint32(const std::string& path)
