@@ -1,0 +1,28 @@
+# heterosplat — per-machine container settings.
+#
+# Copy this file to Scripts/run_configuration.yml (gitignored) and edit the
+# values for your host. Scripts/run_container.sh reads only this file; the
+# .example template here is checked in as the canonical schema reference.
+
+# Index of the GPU to expose, in PCI-bus ordering — i.e. the same indexing
+# `nvidia-smi -L` and `docker run --gpus device=<N>` use. heterosplat
+# targets SM_86 (compute capability 8.6: RTX 3060 / 3070 / 3080 / 3090,
+# A10, A40, A100). Pick whichever PCI index on your system is one of those.
+#
+# Both Scripts/run_container.sh (docker) and Scripts/run_tests.sh (host)
+# read this value. The host script additionally exports
+# CUDA_DEVICE_ORDER=PCI_BUS_ID so CUDA's default
+# highest-compute-capability-first ordering does not silently flip the
+# index relative to docker's PCI ordering on machines with mixed-generation
+# GPUs (e.g. an RTX 3060 alongside a GTX 980 Ti — without PCI ordering,
+# CUDA puts the 3060 at index 0 even if it is at PCI bus 1, while docker
+# always uses PCI). Aligning them means `gpu_id` means the same thing in
+# both contexts.
+gpu_id: 1
+
+# Container image tag.
+#
+# Built from
+# repos/InServiceOfX/Deployments/DockerContainers/Builds/Physics/Heterosplat/.
+# Override only if you've built the image under a different tag.
+image: heterosplat:26.02-py3

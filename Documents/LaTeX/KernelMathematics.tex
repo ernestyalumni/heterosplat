@@ -1,0 +1,615 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage[final]{microtype}
+
+\title{heterosplat: Kernel Mathematics}
+\author{Source: \texttt{repos/heterosplat/Documents/LaTeX/KernelMathematics.tex}}
+\date{\today}
+
+\newcommand{\SO}{\mathrm{SO}}
+\newcommand{\SU}{\mathrm{SU}}
+\newcommand{\SymPos}{\mathrm{Sym}^{+}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\HQ}{\mathbb{H}}
+\newcommand{\PSdef}{\succ 0}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and audience}
+
+This document spells out the mathematics of each CUDA kernel that
+heterosplat ships. Each section names the source files it documents
+and gives the equations actually computed there. The intended reader
+is comfortable with elementary differential geometry (smooth maps
+between manifolds, Jacobians of matrix-valued functions, the Lie
+group $\SO(3)$) and abstract algebra (group actions, quotient
+spaces). The document is meant to be read alongside the source so
+the reader can verify the implementation against the math.
+
+\section{Conventions}
+
+\paragraph{Indexing.}
+Vectors are 1-indexed in math, $0$-indexed in code; we write the
+correspondence explicitly when relevant. All matrices are stored as
+contiguous arrays of \texttt{float}; full $3 \times 3$ blocks are
+\emph{row-major} on disk, while the GLM library's in-register type
+\texttt{glm::mat3} is \emph{column-major}. Kernels that emit a full
+covariance therefore perform a transpose-on-write
+(\texttt{covars[i*3+j] = covar[j][i]}).
+
+\paragraph{Symmetric storage.}
+A symmetric $3\times 3$ matrix may be stored as either:
+\begin{itemize}
+  \item the full $9$-float row-major layout; or
+  \item a $6$-float upper-triangle (``triu'') layout in the order
+  $\bigl(\Sigma_{11},\,\Sigma_{12},\,\Sigma_{13},\,\Sigma_{22},\,\Sigma_{23},\,\Sigma_{33}\bigr)$.
+\end{itemize}
+The kernel's \texttt{triu} boolean selects between them.
+
+\paragraph{Quaternion order.}
+A quaternion is written $q = (w, x, y, z) \in \HQ$ with the real part
+\emph{first}; this matches gsplat's storage. Unit quaternions
+$\HQ_{1} \cong \SU(2)$ double-cover $\SO(3)$ via $q \mapsto R(q)$;
+both $q$ and $-q$ map to the same rotation.
+
+\paragraph{Vector-Jacobian product (VJP).}
+For a smooth map $f : \R^{n} \to \R^{m}$ and a covector
+$v \in (\R^{m})^{*}$, the VJP is $\mathrm{VJP}_{f}(x; v) = v^{T}\,
+\partial f / \partial x \in (\R^{n})^{*}$. In machine-learning idiom,
+if $L$ is a downstream scalar loss and $v = \partial L/\partial f$,
+then $\mathrm{VJP}_{f}(x; v) = \partial L/\partial x$. Every backward
+kernel in heterosplat is a VJP.
+
+\section{Quaternion + scale \texorpdfstring{$\to$}{to} covariance / precision}
+\label{sec:qsc}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel templates (extracted from upstream gsplat):\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/QuatScaleToCovarKernels.cuh}
+  \item Vendored device helpers used by the kernels:\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/Utils.cuh} ---
+  specifically \texttt{quat\_to\_rotmat}, \texttt{quat\_to\_rotmat\_vjp},
+  \texttt{quat\_scale\_to\_covar\_preci}, \texttt{quat\_scale\_to\_covar\_vjp},
+  \texttt{quat\_scale\_to\_preci\_vjp}.
+  \item Our torch-free launcher:\\
+  \texttt{Source/Kernels/Heterosplat/QuatScaleToCovar.\{h,cu\}}.
+  \item Smoke tests:
+  \texttt{Source/UnitTests/Kernels/Heterosplat/QuatScaleToCovar\_tests.cu}.
+\end{itemize}
+
+\subsection{The forward map}
+
+A 3D Gaussian splat is parameterized by a quaternion
+$q \in \HQ \setminus \{0\}$ and a positive scale vector
+$s = (s_{1}, s_{2}, s_{3}) \in \R^{3}_{>0}$. From these, build
+\begin{equation}
+  \hat q \;=\; \frac{q}{\lVert q \rVert}, \qquad
+  R \;=\; R(\hat q) \in \SO(3), \qquad
+  S \;=\; \diag(s_{1},\,s_{2},\,s_{3}) \in \SymPos(3).
+\end{equation}
+The covariance and its inverse (the \emph{precision}) are
+\begin{align}
+  \Sigma &\;=\; R\, S^{2}\, R^{T} \;\in\; \SymPos(3),
+  \label{eq:cov}\\
+  \Pi &\;=\; \Sigma^{-1} \;=\; R\, S^{-2}\, R^{T} \;\in\; \SymPos(3).
+  \label{eq:prec}
+\end{align}
+Equivalently, defining $M = R S$,
+\begin{equation}
+  \Sigma \;=\; M M^{T}, \qquad
+  M' \;=\; R S^{-1} \,\Longrightarrow\, \Pi \;=\; M' (M')^{T}.
+  \label{eq:m-form}
+\end{equation}
+The kernel uses the $M$-form (\eqref{eq:m-form}) because it gives a
+single matrix product per Gaussian regardless of which output
+($\Sigma$, $\Pi$, or both) is requested.
+
+\paragraph{Quaternion to rotation.}
+For $q = (w, x, y, z)$ with $\lVert q \rVert^{2} = w^{2} + x^{2} + y^{2} + z^{2}$
+and $\hat q = q / \lVert q \rVert = (\hat w, \hat x, \hat y, \hat z)$,
+\begin{equation}
+  R(q) \;=\;
+  \begin{pmatrix}
+    1 - 2(\hat y^{2} + \hat z^{2}) &
+      2(\hat x \hat y - \hat w \hat z) &
+      2(\hat x \hat z + \hat w \hat y) \\[2pt]
+    2(\hat x \hat y + \hat w \hat z) &
+      1 - 2(\hat x^{2} + \hat z^{2}) &
+      2(\hat y \hat z - \hat w \hat x) \\[2pt]
+    2(\hat x \hat z - \hat w \hat y) &
+      2(\hat y \hat z + \hat w \hat x) &
+      1 - 2(\hat x^{2} + \hat y^{2})
+  \end{pmatrix}.
+  \label{eq:quat-to-rotmat}
+\end{equation}
+This is implemented in \texttt{quat\_to\_rotmat}. Inline
+normalisation ensures $R \in \SO(3)$ for any $q \neq 0$, so the
+optimizer is free to update $q$ off the unit sphere; the geometry is
+$\mathbb{H}_{1}$-equivariant.
+
+\paragraph{Geometric interpretation.}
+The map
+\begin{equation}
+  \Phi \,\colon\, \SO(3) \times \R^{3}_{>0} \longrightarrow \SymPos(3),
+  \qquad (R, s) \longmapsto R\, \diag(s)^{2}\, R^{T}
+\end{equation}
+is a smooth surjection. On the open dense set of SPD matrices with
+distinct eigenvalues the map is a submersion; the fiber over a generic
+$\Sigma$ is the orbit of the \emph{signed-permutation group}
+$B_{3} \le \mathrm{O}(3)$ acting by
+$(R, s) \mapsto (R P,\, P^{T} s)$ where $P$ is a $3 \times 3$ signed
+permutation matrix and $P^{T} s$ permutes the (positive) entries.
+$B_{3}$ has order $48$. Composed with the $\HQ_{1} \to \SO(3)$ double
+cover, the $(q, s)$ parameterization is $96$-fold redundant. The
+splat loss is invariant under this redundancy, so optimisation does
+not need to break it.
+
+\paragraph{Why this parameterization.}
+A direct optimisation of $\Sigma$ over $\SymPos(3)$ requires a
+Riemannian retraction (or a Cholesky lift with positivity
+constraints). The $(q, s)$ form sidesteps this:
+$\HQ \setminus \{0\}$ is a $4$-dim open subset of $\R^{4}$ and
+$\R^{3}_{>0}$ is a $3$-dim open submanifold of $\R^{3}$, both
+log-trivial; ordinary Adam works on each. Eigenvalues of $\Sigma$
+are exactly $s_{i}^{2}$, so the principal-axis interpretation is
+preserved at all times.
+
+\subsection{Storage layout (forward output)}
+
+For a batch of $N$ Gaussians with output pointer $\Sigma_{\text{out}}$:
+\begin{itemize}
+  \item Full layout (\texttt{triu = false}): $\Sigma_{\text{out}}[N, 3, 3]$
+  is row-major; entry $(i, j)$ of Gaussian $n$ lives at byte index
+  $(9n + 3i + j) \cdot \texttt{sizeof(float)}$. Because GLM's
+  \texttt{mat3} is column-major, the kernel writes
+  \texttt{covars[i*3 + j] = covar[j][i]}.
+  \item Triu layout (\texttt{triu = true}): the six independent
+  entries are written in row-major upper-triangle order, i.e.\
+  $(\Sigma_{11}, \Sigma_{12}, \Sigma_{13}, \Sigma_{22}, \Sigma_{23}, \Sigma_{33})$.
+\end{itemize}
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (forward)}
+\label{sec:qsc-fwd-api}
+
+The C++ launcher
+\texttt{launch\_quat\_scale\_to\_covar\_preci\_forward} (in
+\texttt{Source/Kernels/Heterosplat/QuatScaleToCovar.\{h,cu\}}) is a thin
+host wrapper that fires the templated \texttt{\_\_global\_\_} kernel
+once per Gaussian. Each parameter maps to a math object as follows.
+
+\begin{center}
+\begin{tabular}{l l p{8.0cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math symbol} & \textbf{Meaning} \\
+\hline
+\texttt{N} & $N$ &
+Batch size; one CUDA thread per Gaussian, blocks of $256$. \\
+\texttt{quats} & $\{q_n\}_{n=1}^{N}$ &
+Device buffer $[N, 4]$, row $n$ is $(w_n, x_n, y_n, z_n)$ (real part first).
+Need not be unit length: kernel normalises in-line. \\
+\texttt{scales} & $\{s_n\}_{n=1}^{N}$ &
+Device buffer $[N, 3]$, row $n$ is $(s_1^{(n)}, s_2^{(n)}, s_3^{(n)})$
+with $s_k^{(n)} > 0$. \\
+\texttt{triu} & --- &
+Output layout flag: \texttt{true} = $[N,6]$ upper-triangle order,
+\texttt{false} = $[N,9]$ row-major full $3 \times 3$. \\
+\texttt{covars} & $\{\Sigma_n\}_{n=1}^{N}$ &
+Device output for $\Sigma_n = R_n S_n^{2} R_n^T$. \texttt{nullptr}
+skips the covariance branch entirely. \\
+\texttt{precis} & $\{\Pi_n\}_{n=1}^{N}$ &
+Device output for $\Pi_n = R_n S_n^{-2} R_n^T$. \texttt{nullptr}
+skips the precision branch. \\
+\texttt{stream} & --- &
+CUDA stream for asynchronous overlap; \texttt{nullptr} = default stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent
+The launch is a no-op when $N = 0$ or both \texttt{covars} and
+\texttt{precis} are null. The kernel writes (does not accumulate);
+prior contents of the output buffers are overwritten.
+
+\subsection{The backward map (VJP)}
+\label{sec:qsc-bwd}
+
+Suppose we receive an upstream covariance gradient
+\begin{equation}
+  G \;=\; \frac{\partial L}{\partial \Sigma} \;\in\; \R^{3 \times 3},
+\end{equation}
+and we want to push it back to $(q, s)$. Two key matrix-calculus
+identities do the work.
+
+\paragraph{Identity 1: \texorpdfstring{$\Sigma = M M^{T}$}{Sigma = M M\^{}T}.}
+For $\Sigma = M M^{T}$ with $M \in \R^{3 \times 3}$,
+\begin{equation}
+  \frac{\partial L}{\partial M} \;=\; \bigl(G + G^{T}\bigr)\, M.
+  \label{eq:vjp-mmt}
+\end{equation}
+Derivation: $\partial \Sigma_{ij} / \partial M_{kl} =
+\delta_{ik} M_{jl} + \delta_{jk} M_{il}$, so
+$\partial L / \partial M_{kl} = \sum_{ij} G_{ij}
+(\delta_{ik} M_{jl} + \delta_{jk} M_{il})
+= (GM)_{kl} + (G^{T} M)_{kl}$.
+
+\paragraph{Identity 2: \texorpdfstring{$M = R S$}{M = R S} with \texorpdfstring{$S$}{S} diagonal.}
+\begin{align}
+  \frac{\partial L}{\partial R} &\;=\;
+  \frac{\partial L}{\partial M}\, S, \label{eq:vjp-R}\\
+  \left(\frac{\partial L}{\partial s}\right)_{k} &\;=\;
+  \sum_{i = 1}^{3} R_{ik}\, \biggl(\frac{\partial L}{\partial M}\biggr)_{ik}
+  \quad \text{for } k \in \{1, 2, 3\}. \label{eq:vjp-s}
+\end{align}
+\eqref{eq:vjp-R} follows from $M = R S$ and $S$ being on the right;
+\eqref{eq:vjp-s} comes from $M_{ij} = \sum_{k} R_{ik} S_{kj}
+= R_{ij} s_{j}$ (since $S$ is diagonal), so
+$\partial M_{ij} / \partial s_{k} = R_{ik}\, \delta_{jk}$.
+
+\paragraph{Putting it together.}
+Combining \eqref{eq:vjp-mmt}--\eqref{eq:vjp-s} gives the closed form
+implemented in \texttt{quat\_scale\_to\_covar\_vjp}:
+\begin{align}
+  \widetilde G &\;=\; G + G^{T}, \\
+  \frac{\partial L}{\partial M} &\;=\; \widetilde G \, M, \\
+  \frac{\partial L}{\partial R} &\;=\; \widetilde G \, M \, S \;=\; \widetilde G \, R \, S^{2}, \\
+  \biggl(\frac{\partial L}{\partial s}\biggr)_{k} &\;=\; \sum_{i} R_{ik} \,(\widetilde G M)_{ik}.
+\end{align}
+Finally $\partial L / \partial q$ comes from $\partial L / \partial R$
+via the quaternion-to-rotation Jacobian, implemented in
+\texttt{quat\_to\_rotmat\_vjp}. Because $R$ uses the normalised
+$\hat q = q / \lVert q \rVert$, that helper additionally projects
+the gradient onto $T_{q}\HQ_{1}$ (the tangent space at $q$) so
+non-unit updates do not spuriously enlarge $q$ along its own
+direction.
+
+\paragraph{Triu input gradients (the $\tfrac{1}{2}$ factor).}
+When the upstream gradient is supplied as a $6$-vector $g$ in the
+triu layout, expanding to a symmetric $3 \times 3$ matrix
+double-counts the off-diagonals (each $g_{12}$ contributes once to
+$\Sigma_{12}$ \emph{and} once to $\Sigma_{21}$, but only one of
+those is stored). The kernel halves the off-diagonals:
+\begin{equation}
+  G \;=\; \begin{pmatrix}
+    g_{1} & \tfrac{1}{2} g_{2} & \tfrac{1}{2} g_{3} \\
+    \tfrac{1}{2} g_{2} & g_{4} & \tfrac{1}{2} g_{5} \\
+    \tfrac{1}{2} g_{3} & \tfrac{1}{2} g_{5} & g_{6}
+  \end{pmatrix}.
+  \label{eq:triu-half}
+\end{equation}
+This is the literal $\texttt{0.5f}$ multiplier visible in
+\texttt{quat\_scale\_to\_covar\_preci\_bwd\_kernel} when
+\texttt{triu == true}.
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (backward)}
+\label{sec:qsc-bwd-api}
+
+The companion launcher
+\texttt{launch\_quat\_scale\_to\_covar\_preci\_backward} carries the
+gradient through the operation in §\ref{sec:qsc-bwd}.
+
+\paragraph{The \texttt{v\_} prefix.}
+Every gradient parameter is named \texttt{v\_X}. The convention is
+inherited from gsplat / common automatic-differentiation idiom: read
+\texttt{v\_X} as ``the value of the gradient flowing through $X$,''
+i.e.\ $\partial L / \partial X$. The letter $v$ is short for
+\emph{vector-Jacobian product}; in the language of differential
+geometry, $v_X$ is the cotangent (covector) dual to a tangent
+direction $\mathrm{d}X$, pulled back from the loss.
+
+\paragraph{Why the forward inputs are passed in again.}
+The PyTorch path stashes $q$ and $s$ in autograd's saved-tensor cache
+during the forward call, so they are silently available for backward.
+heterosplat has no such cache: the caller provides them again, and the
+kernel locally recomputes $R(q)$ and $M = R S$ to apply the chain rule.
+This is an explicit memory-versus-compute trade. Because the
+$\Theta(N)$ recompute is dominated by the rasterizer's
+$\Theta(N \cdot \text{tiles})$ work later in the pipeline, the wall-time
+cost is invisible in practice.
+
+\begin{center}
+\begin{tabular}{l l p{8.0cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{N} & $N$ &
+Batch size; must equal the value passed to the forward launcher. \\
+\texttt{quats}, \texttt{scales} & $\{q_n\}, \{s_n\}$ &
+Same forward inputs, used to re-derive $R_n$ and $M_n$ in-kernel. \\
+\texttt{triu} & --- &
+Layout of the input gradient buffers; must match what the forward call
+emitted. When \texttt{true}, the kernel applies the $\tfrac{1}{2}$
+factor on off-diagonals from~\eqref{eq:triu-half}. \\
+\texttt{v\_covars} & $\{ \partial L / \partial \Sigma_n \}$ &
+\emph{Input} gradient. \texttt{nullptr} signals ``$\Sigma$ did not feed
+the loss''; the covariance-side chain rule is skipped. \\
+\texttt{v\_precis} & $\{ \partial L / \partial \Pi_n \}$ &
+\emph{Input} gradient for the precision branch; same \texttt{nullptr}
+semantics as \texttt{v\_covars}. \\
+\texttt{v\_quats} & $\{ \partial L / \partial q_n \}$ &
+\emph{Output} gradient, $[N, 4]$. The kernel \emph{writes} (does not
+accumulate). Caller is responsible for any mixing with prior gradients. \\
+\texttt{v\_scales} & $\{ \partial L / \partial s_n \}$ &
+\emph{Output} gradient, $[N, 3]$; same write-not-accumulate semantics. \\
+\texttt{stream} & --- &
+CUDA stream; \texttt{nullptr} = default. \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent
+\emph{Caveat:} when both \texttt{v\_covars} and \texttt{v\_precis} are
+\texttt{nullptr} the launch is skipped \emph{and the output buffers are
+left untouched}. If ``no gradient'' should mean a literal zero
+(rather than the previous training step's stale memory), the caller
+must zero \texttt{v\_quats} and \texttt{v\_scales} themselves.
+
+\subsection{The precision branch}
+
+For $\Pi = R S^{-2} R^{T}$, the same derivation goes through with
+$M' = R S^{-1}$ in place of $M$, plus a chain-rule factor for the
+inversion of $s$:
+\begin{equation}
+  \frac{\partial s_{k}^{-1}}{\partial s_{k}} \;=\; -\frac{1}{s_{k}^{2}}.
+\end{equation}
+The kernel asserts $s_{k} \neq 0$ before forming $1 / s_{k}$. In the
+production pipeline, frustum culling and minimum-radius filters drop
+degenerate Gaussians upstream, so this assertion is a defensive
+check and never fires in practice.
+
+\subsection{Numerical worth-noting}
+
+\begin{itemize}
+  \item The forward kernel uses \texttt{rsqrt} for quaternion
+  normalisation rather than $1 / \sqrt{\cdot}$; on modern GPUs this
+  is a single intrinsic with relative error $\le 2^{-23}$.
+  \item Inputs and outputs are all \texttt{float32}; double-precision
+  accumulation is not used. For $N \lesssim 10^{6}$ Gaussians (the
+  typical splat scene) this is well within tolerance.
+  \item The forward kernel is parallel over $N$ with no shared
+  memory; one Gaussian per thread, $256$ threads per block. The
+  backward is identical in structure.
+\end{itemize}
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{QuatScaleToCovar\_tests.cu} cover three
+identities from \eqref{eq:cov}:
+\begin{enumerate}
+  \item $q = (1, 0, 0, 0)$, $s = (1, 1, 1)$
+  $\Longrightarrow$
+  $\Sigma = R \, S^{2} \, R^{T} = I_{3} \cdot I_{3} \cdot I_{3}^{T} = I_{3}$.
+  \item $q = (1, 0, 0, 0)$, $s = (2, 3, 5)$
+  $\Longrightarrow$
+  $\Sigma = \diag(4, 9, 25)$.
+  \item Triu layout from the same input matches the diagonal entries
+  in positions $1, 4, 6$ of the $6$-vector and zeros elsewhere
+  (verifying the storage convention from \eqref{eq:triu-half} on the
+  forward side).
+\end{enumerate}
+
+\section{Spherical harmonics (view-dependent colour)}
+\label{sec:sh}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel templates and \texttt{\_\_device\_\_} helpers:\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/SphericalHarmonicsKernels.cuh}
+  (extracted from upstream gsplat's \texttt{SphericalHarmonicsCUDA.cu};
+  the only patch is replacing ATen's \texttt{gpuAtomicAdd} with the
+  CUDA built-in \texttt{atomicAdd}).
+  \item Our torch-free launchers:
+  \texttt{Source/Kernels/Heterosplat/SphericalHarmonics.\{h,cu\}}.
+  \item Smoke tests:
+  \texttt{Source/UnitTests/Kernels/Heterosplat/SphericalHarmonics\_tests.cu}.
+\end{itemize}
+
+\subsection{The forward map}
+
+Each Gaussian carries a per-channel set of real spherical-harmonic
+(SH) coefficients
+$\{c_{l,m}^{(\text{ch})}\}_{l = 0}^{L},\, m = -l, \dots, l$ for
+$\text{ch} \in \{R, G, B\}$. Given a unit view direction
+$\hat d \in S^2$, the kernel emits a colour
+\begin{equation}
+  \text{colour}^{(\text{ch})}(\hat d)
+  \;=\;
+  \sum_{l=0}^{L} \sum_{m=-l}^{l}
+    c_{l,m}^{(\text{ch})}\, Y_{l,m}(\hat d),
+\end{equation}
+where $Y_{l,m} : S^2 \to \R$ are the real-valued spherical harmonics.
+The kernel parameter \texttt{degrees\_to\_use} fixes $L$ at runtime so
+coarse-to-fine training (start at $L = 0$, lift one degree at a time)
+costs no re-allocation.
+
+\paragraph{Background.}
+The $Y_{l,m}$ are an orthonormal basis of $L^{2}(S^{2})$ with respect
+to the surface-area measure: they are eigenfunctions of the
+Laplace--Beltrami operator $\Delta_{S^{2}}$ with eigenvalue $-l(l+1)$.
+The complex spherical harmonics $Y_{l}^{m}$ admit several "real-basis"
+conventions; gsplat (and therefore heterosplat) uses Sloan's
+fast-evaluation form (JCGT 2013), which embeds normalisation
+constants into the recursion and absorbs Condon--Shortley sign
+factors. The first two degrees, in the order the kernel walks
+coefficient indices $0, 1, 2, 3$:
+\begin{align}
+  Y_{0,0}(\hat d) &= \tfrac{1}{2\sqrt{\pi}} \;\approx\; 0.28209479\dots, \\
+  Y_{1,-1}(\hat d) &= -\sqrt{\tfrac{3}{4\pi}}\, y \;\approx\; -0.48860251\dots\, y, \\
+  Y_{1,0}(\hat d)  &= \phantom{-}\sqrt{\tfrac{3}{4\pi}}\, z \;\approx\; \phantom{-}0.48860251\dots\, z, \\
+  Y_{1,1}(\hat d)  &= -\sqrt{\tfrac{3}{4\pi}}\, x \;\approx\; -0.48860251\dots\, x,
+\end{align}
+which is the literal three-term degree-1 expansion in
+\texttt{sh\_coeffs\_to\_color\_fast}. Higher-degree terms follow the
+\emph{associated Legendre} recursion in normalised form; the
+embedded floats (\texttt{0.94617469}\dots etc.) are precomputed
+products of $\sqrt{(2l+1)/(4\pi)}$ and Condon--Shortley factors.
+
+\paragraph{Direction normalisation.}
+The kernel does \emph{not} require its callers to pre-normalise
+\texttt{dirs}; it computes
+$\text{inorm} = 1 / \sqrt{\hat d \cdot \hat d}$ inline and uses
+$\hat d \cdot \text{inorm}$ throughout the recursion. This is the
+correct form because $Y_{l,m}$ is defined on the unit sphere; passing
+in a non-unit vector is equivalent to evaluating at its radial
+projection.
+
+\paragraph{Per-Gaussian masking.}
+The optional \texttt{masks} buffer is a \texttt{[N]} array of
+\texttt{bool}; threads with \texttt{masks[n] == false} short-circuit
+\emph{after} the SH ID dispatch, leaving the corresponding output
+slot untouched. Useful for selectively training subsets of the
+splat without re-allocating coefficient buffers.
+
+\subsection{Storage layout}
+
+\begin{itemize}
+  \item \texttt{dirs} -- \texttt{[N, 3]} row-major, contiguous floats.
+  Internally cast to \texttt{vec3*}; the layout is identical.
+  \item \texttt{coeffs} -- \texttt{[N, K, 3]} row-major. \texttt{K} must
+  be at least $(L+1)^{2}$; e.g.\ degree $0 \to K \ge 1$, degree
+  $1 \to K \ge 4$, ..., degree $4 \to K \ge 25$. The kernel uses
+  \texttt{K} as the per-Gaussian stride only, so \texttt{K} can exceed
+  $(L+1)^{2}$ if the caller wants to keep a degree-4 buffer
+  pre-allocated while training at lower $L$.
+  \item \texttt{colors} -- \texttt{[N, 3]} row-major, RGB.
+\end{itemize}
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (forward)}
+
+\begin{center}
+\begin{tabular}{l l p{8.0cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math symbol} & \textbf{Meaning} \\
+\hline
+\texttt{N} & $N$ & Number of Gaussians; one CUDA thread per
+\emph{(Gaussian, channel)} pair (so total threads = $3N$). \\
+\texttt{K} & $K$ & Per-Gaussian coefficient stride; $K \ge (L+1)^{2}$. \\
+\texttt{degrees\_to\_use} & $L$ & Maximum SH degree to evaluate (0--4
+supported). \\
+\texttt{dirs} & $\{\hat d_n\}$ & View directions, normalised in-kernel. \\
+\texttt{coeffs} & $\{c_{l,m,n}^{(\text{ch})}\}$ & SH coefficients. \\
+\texttt{masks} & --- & Optional per-Gaussian skip flag;
+\texttt{nullptr} = process all. \\
+\texttt{colors} & $\{\text{colour}_n\}$ & Output, $[N, 3]$. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{The backward map (VJPs)}
+
+Backward propagates $v_{\text{colors}} = \partial L / \partial \text{colours}$
+to two parameters: the SH coefficients and (optionally) the view
+direction.
+
+\paragraph{Coefficient gradient (linear).}
+Because the forward is linear in coefficients, the VJP is closed
+form:
+\begin{equation}
+  \frac{\partial L}{\partial c_{l,m,n}^{(\text{ch})}}
+  \;=\;
+  Y_{l,m}(\hat d_n) \cdot v_{\text{colors}}^{(n,\, \text{ch})}.
+\end{equation}
+The kernel writes each \texttt{v\_coeffs[n, l m, ch]} slot \emph{once}
+(single-writer, no atomics).
+
+\paragraph{Direction gradient (chain rule with unit-sphere projection).}
+The dependence on $\hat d$ is more interesting because $\hat d \in S^{2}$.
+Internally the kernel works with the normalised
+$\hat d = d / \lVert d \rVert$ and we want $\partial L / \partial d$
+(the gradient w.r.t.\ the \emph{raw}, possibly non-unit, input).
+
+Computing $\partial L / \partial \hat d$ in the rotated frame is
+straightforward (each coefficient contributes a polynomial in
+$\hat x, \hat y, \hat z$). Pulling that back to $d$ requires the
+unit-sphere projection
+\begin{equation}
+  \frac{\partial L}{\partial d}
+  \;=\;
+  \frac{1}{\lVert d \rVert}
+  \left(I - \hat d\, \hat d^{T}\right)
+  \frac{\partial L}{\partial \hat d},
+  \label{eq:sphere-projection}
+\end{equation}
+which is exactly what the line
+\texttt{(v\_dir\_n - dot(v\_dir\_n, dir\_n) * dir\_n) * inorm}
+computes: $(I - \hat d \hat d^{T})$ removes the radial component
+(motion that does not stay on $S^{2}$), and the $1/\lVert d \rVert$
+factor converts the on-sphere covector to one on the ambient
+$\R^{3}$.
+
+\paragraph{Atomic accumulation.}
+Each Gaussian is touched by three threads (one per colour channel).
+The coefficient gradient is per-(Gaussian, basis, channel), so each
+slot has a single writer. The direction gradient, in contrast, is
+per-Gaussian only -- all three channels write into
+$\partial L / \partial d_n$. The kernel uses \texttt{atomicAdd} on the
+three components to merge the contributions safely. Caller must
+\textbf{pre-zero} \texttt{v\_dirs}; the kernel only accumulates.
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (backward)}
+
+\begin{center}
+\begin{tabular}{l l p{8.0cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{N}, \texttt{K}, \texttt{degrees\_to\_use} & --- &
+Same shape parameters as forward. \\
+\texttt{dirs}, \texttt{coeffs} & $\hat d, c$ &
+Forward inputs; needed for the VJP chain rule. \\
+\texttt{masks} & --- & Optional skip flag (same as forward). \\
+\texttt{v\_colors} & $\partial L / \partial \text{colours}$ &
+\emph{Input} gradient, $[N, 3]$. \\
+\texttt{v\_coeffs} & $\partial L / \partial c$ &
+\emph{Output} gradient, $[N, K, 3]$. Single-writer; kernel
+\emph{writes} (no accumulate). \\
+\texttt{v\_dirs} & $\partial L / \partial d$ &
+\emph{Output} gradient, $[N, 3]$. \texttt{nullptr} skips the path
+entirely; otherwise the kernel \emph{accumulates} via
+\texttt{atomicAdd} -- caller must pre-zero. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{SphericalHarmonics\_tests.cu} cover:
+\begin{enumerate}
+  \item \emph{Degree 0 is DC}: with $L = 0$ the only basis is
+  $Y_{0,0} = 1/(2\sqrt{\pi})$, so
+  $\text{colours}_n = 0.282\dots \cdot c_{0, n}$.
+  \item \emph{Degree 1 single-basis}: with $\hat d = (0, 1, 0)$ and
+  only $c_{1,-1}$ non-zero, the kernel reduces to
+  $\text{colours} = -0.488\dots \cdot c_{1,-1}$, isolating the
+  $Y_{1,-1}$ term.
+  \item \emph{Mask short-circuit}: a \texttt{masks[n] = false}
+  Gaussian's output slot is left at a sentinel value, confirming the
+  early-return path.
+  \item \emph{Backward gradcheck (coefficients)}: the analytic
+  \texttt{v\_coeffs} from the kernel matches a centered
+  finite-difference numerical gradient through the forward to within
+  $\text{atol} = 10^{-3}$ + $\text{rtol} = 5 \times 10^{-3}$.
+\end{enumerate}
+
+\section{Future sections}
+
+This document grows one section per kernel as Phase 0b adds them:
+tile intersection, EWA projection, and the tile-rasterizer
+(forward + backward). Each follows the same template: source-file
+pointers, the forward map in coordinate-free form, the VJP
+derivation, the launcher API correspondence, and the test
+correspondence.
+
+\end{document}

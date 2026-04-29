@@ -1,0 +1,58 @@
+heterosplat — vendored gsplat kernels
+======================================
+
+Files in this directory are derived from the gsplat project:
+  https://github.com/nerfstudio-project/gsplat
+  License: Apache License 2.0 (see LICENSE in this directory).
+
+Upstream commit: 53f89aa58fdbe6bf1b442975e1e4b7d5411e94e5
+Imported on:     2026-04-28
+Imported into:   heterosplat / CUDA/Heterosplat/Source/Kernels/Thirdparty/Gsplat
+
+Modifications applied during vendoring
+--------------------------------------
+
+Common.h
+  - Removed PyTorch-coupled macros: CHECK_CUDA, CHECK_CONTIGUOUS, CHECK_INPUT,
+    DEVICE_GUARD, CUB_WRAPPER. These reference TORCH_CHECK,
+    at::cuda::OptionalCUDAGuard, and c10::cuda::CUDACachingAllocator and have
+    no equivalents in our raw-pointer launcher path.
+  - Kept: glm vec/mat typedefs, GAUSSIAN_EXTEND / MAX_ALPHA / TRANSMITTANCE_*
+    constants, GSPLAT_NOINLINE.
+
+Config.h
+  - Unmodified.
+
+Utils.cuh
+  - Unmodified. Pure __device__ code, no torch dependency.
+
+QuatScaleToCovarKernels.cuh (NEW)
+  - Extracted the templated __global__ kernels
+    quat_scale_to_covar_preci_{fwd,bwd}_kernel verbatim from gsplat's
+    QuatScaleToCovarCUDA.cu. The launch_* host functions and AT_DISPATCH_*
+    macro are dropped — replaced by raw-pointer launchers in
+    CUDA/Heterosplat/Source/Kernels/Heterosplat/.
+
+SphericalHarmonicsKernels.cuh (NEW)
+  - Extracted the two __device__ helpers (sh_coeffs_to_color_fast and
+    sh_coeffs_to_color_fast_vjp) and the two templated __global__ kernels
+    spherical_harmonics_{fwd,bwd}_kernel verbatim from gsplat's
+    SphericalHarmonicsCUDA.cu. The launch_* host functions and
+    AT_DISPATCH_* macro are dropped.
+  - Replaced ATen's gpuAtomicAdd (from <ATen/cuda/Atomic.cuh>) with the
+    CUDA-native atomicAdd inside spherical_harmonics_bwd_kernel for the
+    v_dirs accumulation. gpuAtomicAdd is a thin ATen wrapper around
+    atomicAdd for the float case used here, so the substitution is
+    bit-equivalent.
+
+Files NOT vendored from upstream
+--------------------------------
+
+  - QuatScaleToCovar.cpp / QuatScaleToCovar.h (torch boundary; replaced).
+  - QuatScaleToCovarCUDA.cu's launch_* host functions (replaced).
+  - 2DGS / 3DGUT / lidar / external-distortion / camera-wrappers kernels
+    (out of scope for heterosplat — see PLAN.md done-criteria).
+
+Per the Apache 2.0 License, Section 4(c), this NOTICE is preserved in the
+vendored tree. Modifications above carry prominent notices marking them as
+changed from the original.

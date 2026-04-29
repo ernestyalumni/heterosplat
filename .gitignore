@@ -9,6 +9,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+Build/
 develop-eggs/
 dist/
 downloads/
@@ -216,3 +217,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Per-machine container config (GPU index, image tag). Use
+# Scripts/run_configuration.yml.example as the template.
+Scripts/run_configuration.yml
