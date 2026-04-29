@@ -603,13 +603,175 @@ The smoke tests in \texttt{SphericalHarmonics\_tests.cu} cover:
   $\text{atol} = 10^{-3}$ + $\text{rtol} = 5 \times 10^{-3}$.
 \end{enumerate}
 
+\section{Tile intersection}
+\label{sec:intersect-tile}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel template and AccuTile/SNUGBOX helpers
+  (extracted from upstream gsplat):\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/IntersectTileKernels.cuh}
+  \item Raw-pointer launcher owned by heterosplat:\\
+  \texttt{Source/Kernels/Heterosplat/IntersectTile.\{h,cu\}}
+  \item Tests and oracle fixtures:\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/IntersectTile\_tests.cu}\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/IntersectTile\_oracle\_tests.cu}\\
+  \texttt{Source/UnitTests/Fixtures/IntersectTile/}
+\end{itemize}
+
+\subsection{The forward map}
+
+The tile-intersection kernel converts projected 2D Gaussians into a
+flat list of tile intersections. For each image $i \in \{0,\dots,I-1\}$
+and Gaussian $n \in \{0,\dots,N-1\}$, the input is:
+\[
+  \mu_{i,n} = (x_{i,n}, y_{i,n}) \in \R^{2}, \qquad
+  r_{i,n} = (r^x_{i,n}, r^y_{i,n}) \in \mathbb{Z}^{2}, \qquad
+  z_{i,n} \in \R.
+\]
+In packed mode, the dense pair $(i,n)$ is replaced by a packed row
+$p \in \{0,\dots,\mathrm{nnz}-1\}$ and an explicit image id
+\texttt{image\_ids[p]}. The output \texttt{flatten\_ids} always stores
+the dense flatten index $iN+n$ or the packed row $p$.
+
+The kernel is a two-pass map. First it counts how many tiles each
+Gaussian touches:
+\[
+  c_k = \lvert T_k \rvert,
+\]
+where $k$ is either the dense flatten index or packed row, and $T_k$
+is the set of intersected tile ids. The caller prefix-sums these
+counts to obtain
+\[
+  C_k = \sum_{j=0}^{k} c_j.
+\]
+The second pass writes the actual intersections into the half-open
+slice
+\[
+  [\, C_{k-1}, C_k \,),
+  \qquad C_{-1} = 0.
+\]
+
+\paragraph{AABB fallback.}
+When \texttt{conics == nullptr} or \texttt{opacities == nullptr}, the
+kernel uses the axis-aligned radius rectangle. Let $s$ be
+\texttt{tile\_size}; tile coordinates are
+\[
+  u = x/s, \qquad v = y/s, \qquad
+  \rho_x = r^x/s, \qquad \rho_y = r^y/s.
+\]
+The inclusive/exclusive tile bounds are:
+\[
+\begin{aligned}
+  t^x_{\min} &= \operatorname{clamp}(\lfloor u-\rho_x \rfloor, 0, W), &
+  t^x_{\max} &= \operatorname{clamp}(\lceil u+\rho_x \rceil, 0, W),\\
+  t^y_{\min} &= \operatorname{clamp}(\lfloor v-\rho_y \rfloor, 0, H), &
+  t^y_{\max} &= \operatorname{clamp}(\lceil v+\rho_y \rceil, 0, H),
+\end{aligned}
+\]
+where $W=\texttt{tile\_width}$ and $H=\texttt{tile\_height}$. The tile
+set is the Cartesian product
+\[
+  T_k =
+  \{\, yW+x \mid
+      x \in [t^x_{\min},t^x_{\max}),\;
+      y \in [t^y_{\min},t^y_{\max}) \,\}.
+\]
+If either radius component is non-positive, $T_k$ is empty.
+
+\paragraph{AccuTile/SNUGBOX path.}
+When both \texttt{conics} and \texttt{opacities} are present, the
+kernel interprets
+\[
+  Q =
+  \begin{bmatrix}
+    A & B\\
+    B & C
+  \end{bmatrix}
+\]
+as the inverse projected covariance. It intersects tiles with the
+opacity-thresholded ellipse
+\[
+  (p-\mu)^T Q (p-\mu) \le
+  \min\!\left(3.33^2,\; 2\log(\alpha / \tau)\right),
+  \qquad \tau = 1/255.
+\]
+The helper first computes a tight axis-aligned ellipse bounding box
+(SNUGBOX), then scans tile columns or rows depending on the shorter
+span. The fixture currently checks the AABB path against gsplat; the
+AccuTile path is present in the vendored kernel and should get a
+dedicated oracle fixture before relying on it in the projection
+pipeline.
+
+\subsection{Intersection-id encoding}
+
+Each output intersection id is a signed 64-bit integer whose bit
+layout matches gsplat:
+\[
+  \texttt{isect\_id}
+  =
+  (i \ll (32 + b_t))
+  \;|\;
+  (\texttt{tile\_id} \ll 32)
+  \;|\;
+  \operatorname{bits}_{32}(z),
+\]
+where $b_t = \lfloor \log_2(W H) \rfloor + 1$ and
+$\operatorname{bits}_{32}(z)$ is the bit-level float32 representation
+of depth, zero-extended to 64 bits. This ordering lets a later radix
+sort group by image, then tile, then depth without carrying separate
+side arrays.
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{packed} & --- & Selects dense $I\times N$ indexing or packed
+$\mathrm{nnz}$ indexing. \\
+\texttt{I}, \texttt{N}, \texttt{nnz} & $I,N,\mathrm{nnz}$ & Shape
+parameters. \\
+\texttt{image\_ids} & $i(p)$ & Required in packed mode; null in dense mode. \\
+\texttt{means2d} & $\mu_k$ & Projected Gaussian centers. \\
+\texttt{radii} & $r_k$ & Pixel-space AABB radii; non-positive component
+culls the Gaussian. \\
+\texttt{depths} & $z_k$ & Depth used in the low 32 bits of
+\texttt{isect\_ids}. \\
+\texttt{conics}, \texttt{opacities} & $Q_k,\alpha_k$ & Optional AccuTile
+ellipse inputs. Both must be non-null to enable the ellipse path. \\
+\texttt{cum\_tiles\_per\_gauss} & $C_k$ & Null for first pass; inclusive
+prefix sum for second pass. \\
+\texttt{tiles\_per\_gauss} & $c_k$ & First-pass output. \\
+\texttt{isect\_ids}, \texttt{flatten\_ids} & --- & Second-pass outputs. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{IntersectTile\_tests.cu} cover:
+\begin{enumerate}
+  \item \emph{Dense AABB two-pass}: one Gaussian touches a $2\times2$
+  tile block and one Gaussian is culled by zero radius. The test checks
+  tile counts, encoded \texttt{isect\_ids}, and \texttt{flatten\_ids}.
+  \item \emph{Packed AABB}: packed rows use explicit image ids in the
+  high bits while keeping packed row indices as \texttt{flatten\_ids}.
+\end{enumerate}
+The oracle test in \texttt{IntersectTile\_oracle\_tests.cu} replays a
+seeded gsplat-Python fixture captured with \texttt{isect\_tiles(...,
+sort=False)} and checks both passes exactly. Sorting is intentionally
+outside this launcher; a later CUB utility will own that boundary.
+
 \section{Future sections}
 
 This document grows one section per kernel as Phase 0b adds them:
-tile intersection, EWA projection, and the tile-rasterizer
+\texttt{intersect\_offset}, EWA projection, and the tile-rasterizer
 (forward + backward). Each follows the same template: source-file
 pointers, the forward map in coordinate-free form, the VJP
-derivation, the launcher API correspondence, and the test
-correspondence.
+derivation when applicable, the launcher API correspondence, and the
+test correspondence.
 
 \end{document}

@@ -102,8 +102,10 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-23 tests (`./build/Check`), all passing. Suite layout:
+26 tests (`./build/Check`), all passing. Suite layout:
 - `Tensor.*` (10) — Core/Tensor.h
+- `IntersectTile.*` (2) — dense AABB two-pass + packed image-id encoding
+- `IntersectTileOracle.*` (1) — vs gsplat-Python, dense AABB fwd
 - `QuatScaleToCovar.*` (5) — closed-form forward × 3, closed-form backward, gradcheck backward
 - `QuatScaleToCovarOracle.*` (2) — vs gsplat-Python, fwd + bwd
 - `SphericalHarmonics.*` (4) — DC, single-basis, mask, gradcheck
@@ -128,7 +130,7 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 ## Where to start (next concrete action)
 
-**Phase 0b kernel #3: `intersect_tile`** (forward only — no backward path in PLAN.md table). It's the first "plumbing-heavy" kernel: per-tile gaussian binning + sort. After this, `intersect_offset` (prefix sum on tile_offsets), then the heavy two: `projection_ewa_3dgs_fused` (fwd+bwd) and `rasterize_to_pixels_3dgs` (fwd+bwd). Once all six are wired, the `forward_backward_smoke_test` binary closes Phase 0b's done-criteria.
+**Phase 0b kernel #4: `intersect_offset`** (forward only — no backward path in PLAN.md table). It consumes sorted `isect_ids` and writes per-image/per-tile offsets. After that, the heavy two are `projection_ewa_3dgs_fused` (fwd+bwd) and `rasterize_to_pixels_3dgs` (fwd+bwd). Once all six are wired, the `forward_backward_smoke_test` binary closes Phase 0b's done-criteria.
 
 Open question worth flagging early for `rasterize_to_pixels_3dgs`: it uses tile-level cooperative groups and shared memory; check whether any helpers beyond `Common.h` / `Utils.cuh` need vendoring.
 
