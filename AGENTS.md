@@ -56,12 +56,14 @@ heterosplat/
         │   │   ├── SphericalHarmonicsKernels.cuh   (gpuAtomicAdd → atomicAdd)
         │   │   ├── IntersectTileKernels.cuh
         │   │   ├── IntersectOffsetKernels.cuh
-        │   │   └── ProjectionEWA3DGSFusedKernels.cuh   (gpuAtomicAdd → atomicAdd)
+        │   │   ├── ProjectionEWA3DGSFusedKernels.cuh   (gpuAtomicAdd → atomicAdd)
+        │   │   └── RasterizeToPixels3DGSKernels.cuh    (gpuAtomicAdd → atomicAdd)
         │   └── Heterosplat/               # our raw-pointer launchers
         │       ├── IntersectOffset.{h,cu}
         │       ├── IntersectTile.{h,cu}
         │       ├── ProjectionEWA3DGSFused.{h,cu}
         │       ├── QuatScaleToCovar.{h,cu}
+        │       ├── RasterizeToPixels3DGS.{h,cu}
         │       └── SphericalHarmonics.{h,cu}
         └── UnitTests/                     # single Check executable, gtest_discover
             ├── DeviceBuffer.h             # typed GPU buffer for tests
@@ -71,6 +73,7 @@ heterosplat/
             │   ├── IntersectTile/
             │   ├── ProjectionEWA3DGSFused/
             │   ├── QuatScaleToCovar/
+            │   ├── RasterizeToPixels3DGS/
             │   └── SphericalHarmonics/
             └── Kernels/Heterosplat/
                 ├── *_tests.cu             # closed-form + gradcheck
@@ -112,7 +115,7 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-34 tests (`./build/Check`), all passing. Suite layout:
+38 tests (`./build/Check`), all passing. Suite layout:
 - `Tensor.*` (10) — Core/Tensor.h
 - `IntersectOffset.*` (3) — single-image, multi-image, zero-intersections
 - `IntersectOffsetOracle.*` (1) — vs gsplat-Python
@@ -122,6 +125,8 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 - `ProjectionEWA3DGSFusedOracle.*` (1) — vs gsplat-Python, fwd
 - `QuatScaleToCovar.*` (5) — closed-form forward × 3, closed-form backward, gradcheck backward
 - `QuatScaleToCovarOracle.*` (2) — vs gsplat-Python, fwd + bwd
+- `RasterizeToPixels3DGS.*` (3) — single Gaussian center, zero intersections, backward finite grads
+- `RasterizeToPixels3DGSOracle.*` (1) — vs gsplat-Python, fwd
 - `SphericalHarmonics.*` (4) — DC, single-basis, mask, gradcheck
 - `SphericalHarmonicsOracle.*` (2) — vs gsplat-Python, fwd + bwd
 
@@ -144,7 +149,7 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 ## Where to start (next concrete action)
 
-**Phase 0b kernel #6: `rasterize_to_pixels_3dgs`** (fwd + bwd). The final and heaviest kernel: tile rasterizer with per-tile cooperative groups and shared memory. After this, the `forward_backward_smoke_test` binary closes Phase 0b's done-criteria.
+**Phase 0b is complete** — all 6 kernels are vendored, launched, and tested. Next: build the `forward_backward_smoke_test` binary that runs fwd+bwd on a 1k-Gaussian, 64x64 image fixture to close Phase 0b's done-criteria, then begin Phase 1 (single-source train + render).
 
 Open question worth flagging early for `rasterize_to_pixels_3dgs`: it uses tile-level cooperative groups and shared memory; check whether any helpers beyond `Common.h` / `Utils.cuh` need vendoring.
 

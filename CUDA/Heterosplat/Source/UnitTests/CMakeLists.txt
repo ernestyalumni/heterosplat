@@ -8,6 +8,8 @@ ADD_EXECUTABLE(Check
   Kernels/Heterosplat/IntersectTile_oracle_tests.cu
   Kernels/Heterosplat/ProjectionEWA3DGSFused_tests.cu
   Kernels/Heterosplat/ProjectionEWA3DGSFused_oracle_tests.cu
+  Kernels/Heterosplat/RasterizeToPixels3DGS_tests.cu
+  Kernels/Heterosplat/RasterizeToPixels3DGS_oracle_tests.cu
   Kernels/Heterosplat/QuatScaleToCovar_tests.cu
   Kernels/Heterosplat/QuatScaleToCovar_oracle_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_tests.cu

@@ -1141,12 +1141,247 @@ replays a gsplat-Python fixture ($B=1$, $C=1$, $N=8$, pinhole) and
 compares projected means, depths, and conics (masking culled
 Gaussians) with $\text{atol} = 10^{-3}$, $\text{rtol} = 5 \times 10^{-3}$.
 
+\section{Tile rasterizer (3DGS)}
+\label{sec:rasterize}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel templates (extracted from upstream gsplat):\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/RasterizeToPixels3DGSKernels.cuh}
+  (patched: \texttt{gpuAtomicAdd} $\to$ \texttt{atomicAdd}; ATen
+  launchers, \texttt{GSPLAT\_BUILD\_3DGS} guard, \texttt{Rasterization.h}
+  include, and \texttt{GSPLAT\_FOR\_EACH} instantiations dropped).
+  \item Raw-pointer launchers owned by heterosplat:\\
+  \texttt{Source/Kernels/Heterosplat/RasterizeToPixels3DGS.\{h,cu\}}.
+  \item Tests and oracle fixtures:\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/RasterizeToPixels3DGS\_tests.cu}\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/RasterizeToPixels3DGS\_oracle\_tests.cu}\\
+  \texttt{Source/UnitTests/Fixtures/RasterizeToPixels3DGS/}
+\end{itemize}
+
+\subsection{The forward map}
+
+The tile rasterizer is the final stage of the 3DGS rendering pipeline.
+For each pixel $(i, j)$ in each image, it alpha-composites all
+Gaussians that intersect the pixel's tile, in front-to-back depth
+order. The inputs are the outputs of the earlier pipeline stages:
+projected means and conics from the EWA projection
+(\S\ref{sec:projection}), tile offsets from the intersection encoding
+(\S\ref{sec:intersect-offset}), and per-Gaussian colours and
+opacities.
+
+\paragraph{Per-pixel compositing.}
+For a pixel at position $p = (p_x, p_y)$ and the Gaussians
+$g_1, \dots, g_K$ assigned to its tile (in depth-sorted order), the
+compositing loop computes:
+\begin{align}
+  \sigma_k &= \tfrac{1}{2}\, \delta_k^T\, Q_k\, \delta_k,
+  \qquad \delta_k = \mu_{2d,k} - p,
+  \label{eq:rast-sigma}\\
+  \alpha_k &= \min\!\bigl(\alpha_{\max},\; o_k\, e^{-\sigma_k}\bigr),
+  \label{eq:rast-alpha}\\
+  T_k &= \prod_{j=1}^{k-1} (1 - \alpha_j),
+  \qquad T_1 = 1,
+  \label{eq:rast-transmittance}\\
+  C(p) &= \sum_{k=1}^{K} \alpha_k\, T_k\, c_k,
+  \label{eq:rast-color}\\
+  A(p) &= 1 - T_{K+1} = 1 - \prod_{k=1}^{K} (1 - \alpha_k),
+  \label{eq:rast-alpha-out}
+\end{align}
+where $Q_k$ is the inverse 2D covariance (conic), $o_k$ is the base
+opacity, $c_k \in \R^{\texttt{CDIM}}$ is the per-Gaussian colour, and
+$\alpha_{\max}$ is a saturation cap (\texttt{MAX\_ALPHA} $= 0.999$).
+
+The loop terminates early when the accumulated transmittance drops
+below a threshold $\tau_T$ (\texttt{TRANSMITTANCE\_THRESHOLD}),
+preventing negligible contributions from wasting compute.
+
+\paragraph{Tile-cooperative loading.}
+Each CUDA block processes one tile
+(\texttt{tile\_size}~$\times$~\texttt{tile\_size} threads). Gaussians
+are loaded from global memory into shared memory in batches of
+\texttt{block\_size} by all threads cooperatively; each thread then
+evaluates only its own pixel against the shared batch. This reduces
+global memory traffic by a factor of $\texttt{tile\_size}^2$.
+
+\paragraph{Background colour.}
+If a per-image background $b \in \R^{\texttt{CDIM}}$ is provided, the
+final colour includes the background blended through the remaining
+transmittance:
+\begin{equation}
+  C_{\text{final}}(p) = C(p) + T_{K+1}\, b.
+  \label{eq:rast-bg}
+\end{equation}
+
+\subsection{Storage layout}
+
+\begin{itemize}
+  \item \texttt{means2d} --- $[I, N, 2]$ or $[\text{nnz}, 2]$
+  (packed mode). Interpreted as \texttt{vec2*}.
+  \item \texttt{conics} --- $[I, N, 3]$ or $[\text{nnz}, 3]$. Upper
+  triangle $(a, b, c)$ of the inverse 2D covariance; interpreted as
+  \texttt{vec3*}.
+  \item \texttt{colors} --- $[I, N, \texttt{CDIM}]$ or
+  $[\text{nnz}, \texttt{CDIM}]$. Raw float array.
+  \item \texttt{opacities} --- $[I, N]$ or $[\text{nnz}]$.
+  \item \texttt{tile\_offsets} --- $[I, H_t, W_t]$ (int32). Start
+  index into \texttt{flatten\_ids} for each tile.
+  \item \texttt{flatten\_ids} --- $[M]$ (int32). Sorted Gaussian
+  indices.
+  \item \texttt{render\_colors} --- $[I, H, W, \texttt{CDIM}]$. Output.
+  \item \texttt{render\_alphas} --- $[I, H, W]$. Output.
+  \item \texttt{last\_ids} --- $[I, H, W]$ (int32). Index of last
+  contributing Gaussian per pixel (used by backward).
+\end{itemize}
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (forward)}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math symbol} & \textbf{Meaning} \\
+\hline
+\texttt{I} & $I$ & Number of images. \\
+\texttt{N} & $N$ & Gaussians per image (dense mode). \\
+\texttt{n\_isects} & $M$ & Total sorted intersections. \\
+\texttt{packed} & --- & Dense vs.\ packed indexing. \\
+\texttt{means2d} & $\mu_{2d}$ & Projected centres. \\
+\texttt{conics} & $Q$ & Inverse 2D covariance (conic). \\
+\texttt{colors} & $c$ & Per-Gaussian colours. \\
+\texttt{opacities} & $o$ & Per-Gaussian base opacities. \\
+\texttt{backgrounds} & $b$ & Optional per-image background. \\
+\texttt{masks} & --- & Optional per-tile skip mask. \\
+\texttt{tile\_offsets} & --- & Per-tile start into sorted isects. \\
+\texttt{flatten\_ids} & --- & Sorted Gaussian indices. \\
+\texttt{render\_colors} & $C(p)$ & Output rendered colour. \\
+\texttt{render\_alphas} & $A(p)$ & Output rendered alpha. \\
+\texttt{last\_ids} & --- & Per-pixel last-Gaussian index (for bwd). \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{The backward map (VJP)}
+
+The backward kernel traverses Gaussians in \emph{back-to-front} order
+(the reverse of the forward), recomputing $\alpha_k$ and $T_k$ on
+the fly. The key gradient relations, derived from
+\eqref{eq:rast-color}--\eqref{eq:rast-alpha-out}:
+
+\paragraph{Colour gradient.}
+\begin{equation}
+  v_{c_k} = \alpha_k\, T_k\, v_{C(p)}.
+  \label{eq:rast-bwd-color}
+\end{equation}
+
+\paragraph{Alpha gradient.}
+The gradient $v_{\alpha_k} = \partial L / \partial \alpha_k$ mixes
+contributions from the rendered colour, the rendered alpha, and
+(optionally) the background:
+\begin{equation}
+  v_{\alpha_k} = \sum_{j} \Bigl(c_k^{(j)}\, T_k - B_k^{(j)}\, r_k\Bigr)\,
+  v_{C(p)}^{(j)}
+  + T_{\text{final}}\, r_k\, v_{A(p)},
+  \label{eq:rast-bwd-alpha}
+\end{equation}
+where $r_k = 1 / (1 - \alpha_k)$ and $B_k$ is the accumulated colour
+contribution from Gaussians \emph{behind} $k$.
+
+\paragraph{Sigma and position gradients.}
+From $\alpha_k = o_k\, e^{-\sigma_k}$:
+\begin{align}
+  v_{\sigma_k} &= -o_k\, e^{-\sigma_k}\, v_{\alpha_k},
+  \label{eq:rast-bwd-sigma}\\
+  v_{Q_k} &= \tfrac{1}{2}\, v_{\sigma_k}\,
+  \begin{pmatrix} \delta_x^2 & 2\delta_x \delta_y & \delta_y^2 \end{pmatrix},
+  \label{eq:rast-bwd-conic}\\
+  v_{\mu_{2d,k}} &= v_{\sigma_k}\,
+  \begin{pmatrix} Q_{11}\delta_x + Q_{12}\delta_y \\
+  Q_{12}\delta_x + Q_{22}\delta_y \end{pmatrix}.
+  \label{eq:rast-bwd-mean}
+\end{align}
+
+\paragraph{Warp-level reduction.}
+Many pixels within a tile contribute gradients to the same Gaussian.
+The kernel uses \texttt{cg::tiled\_partition<32>} warp reductions
+followed by a single \texttt{atomicAdd} per warp leader. Callers
+must pre-zero all gradient output buffers.
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (backward)}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{I}, \texttt{N}, \texttt{n\_isects} & --- & Same shape parameters. \\
+\texttt{means2d}, \texttt{conics}, \texttt{colors}, \texttt{opacities} &
+--- & Forward inputs, re-read for VJP. \\
+\texttt{render\_alphas}, \texttt{last\_ids} & --- & Forward outputs
+needed for back-to-front traversal. \\
+\texttt{v\_render\_colors} & $v_{C(p)}$ & Input gradient. \\
+\texttt{v\_render\_alphas} & $v_{A(p)}$ & Input gradient. \\
+\texttt{v\_means2d} & $v_{\mu_{2d}}$ & Output gradient. Pre-zero;
+kernel accumulates. \\
+\texttt{v\_means2d\_abs} & $|v_{\mu_{2d}}|$ & Optional absolute-value
+gradient (adaptive densification). \\
+\texttt{v\_conics} & $v_Q$ & Output gradient. Pre-zero; accumulates. \\
+\texttt{v\_colors} & $v_c$ & Output gradient. Pre-zero; accumulates. \\
+\texttt{v\_opacities} & $v_o$ & Output gradient. Pre-zero; accumulates. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Numerical worth-noting}
+
+\begin{itemize}
+  \item The colour channel count \texttt{CDIM} is a compile-time
+  template parameter. heterosplat instantiates \texttt{CDIM=3} (RGB).
+  Upstream gsplat supports a wider set via
+  \texttt{GSPLAT\_FOR\_EACH}; extending heterosplat requires adding
+  explicit instantiations in the launcher \texttt{.cu}.
+  \item The forward uses \texttt{\_\_syncthreads\_count(done)} to
+  exit early when the entire tile has saturated. This is critical
+  for performance in scenes where many tiles reach
+  $T \le \tau_T$ early.
+  \item Shared memory per block is
+  $\texttt{tile\_size}^2 \cdot (\texttt{sizeof(int32)} +
+  2 \cdot \texttt{sizeof(vec3)})$ for the forward and additionally
+  $\texttt{tile\_size}^2 \cdot \texttt{CDIM} \cdot
+  \texttt{sizeof(float)}$ for the backward (colours are cached for
+  the gradient computation). The launcher calls
+  \texttt{cudaFuncSetAttribute} to request sufficient dynamic shared
+  memory.
+  \item The backward traverses in reverse order and recomputes
+  transmittances from the saved \texttt{render\_alphas} (final $T$)
+  and per-step $\alpha$ values. This avoids storing intermediate
+  $T_k$ per pixel but costs one \texttt{fmaxf} guarded reciprocal
+  per step.
+\end{itemize}
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{RasterizeToPixels3DGS\_tests.cu} cover:
+\begin{enumerate}
+  \item \emph{Single Gaussian}: one Gaussian at tile centre with
+  isotropic conic and red colour. The centre pixel should have
+  non-zero alpha and red colour contribution.
+  \item \emph{Zero intersections}: with no Gaussians, all pixels
+  should have zero alpha.
+  \item \emph{Backward smoke}: unit upstream gradients through a
+  visible Gaussian; checks that $\partial L / \partial c$ is finite
+  and non-zero.
+\end{enumerate}
+The oracle test in \texttt{RasterizeToPixels3DGS\_oracle\_tests.cu}
+replays a gsplat-Python fixture ($I=1$, $N=8$, $32 \times 32$
+image) through the full pipeline and compares rendered colours and
+alphas with $\text{atol} = 10^{-3}$, $\text{rtol} = 5 \times 10^{-3}$.
+
 \section{Future sections}
 
-This document grows one section per kernel as Phase 0b adds them:
-the tile-rasterizer (forward + backward). Each
-follows the same template: source-file pointers, the forward map in
-coordinate-free form, the VJP derivation when applicable, the
-launcher API correspondence, and the test correspondence.
+This document is complete for Phase 0b. Future phases may add custom
+kernels (e.g.\ \texttt{apply\_homogeneous\_transform\_kernel} in
+Phase 2) which will be documented following the same template.
 
 \end{document}

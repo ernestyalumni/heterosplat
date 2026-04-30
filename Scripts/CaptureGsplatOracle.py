@@ -31,6 +31,7 @@ from gsplat.cuda._wrapper import (
     isect_offset_encode,
     isect_tiles,
     quat_scale_to_covar_preci,
+    rasterize_to_pixels,
     spherical_harmonics,
 )
 
@@ -419,6 +420,114 @@ def capture_projection_ewa_3dgs_fused(out_dir: str, seed: int = 42) -> None:
           f"-> {out_dir}")
 
 
+def capture_rasterize_to_pixels_3dgs(out_dir: str, seed: int = 42) -> None:
+    """Forward fixture for rasterize_to_pixels_3dgs via the full pipeline."""
+    os.makedirs(out_dir, exist_ok=True)
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    N = 8
+    image_width = 32
+    image_height = 32
+    tile_size = 16
+    eps2d = 0.3
+    near_plane = 0.01
+    far_plane = 1e10
+
+    means = torch.randn(N, 3, generator=generator, device="cuda",
+                         dtype=torch.float32)
+    means[:, 2] = means[:, 2].abs() + 1.0
+
+    quats = torch.randn(N, 4, generator=generator, device="cuda",
+                         dtype=torch.float32)
+    quats = quats / quats.norm(dim=-1, keepdim=True)
+
+    scales = torch.rand(N, 3, generator=generator, device="cuda",
+                         dtype=torch.float32) * 0.3 + 0.01
+
+    viewmats = torch.eye(4, device="cuda", dtype=torch.float32).unsqueeze(0)
+    Ks = torch.tensor(
+        [[[100.0, 0, 16], [0, 100.0, 16], [0, 0, 1]]],
+        device="cuda", dtype=torch.float32)
+
+    colors = torch.rand(1, N, 3, generator=generator, device="cuda",
+                         dtype=torch.float32)
+    opacities_3d = torch.rand(N, generator=generator, device="cuda",
+                               dtype=torch.float32) * 0.8 + 0.1
+
+    radii, means2d, depths, conics, _comp = fully_fused_projection(
+        means.unsqueeze(0), covars=None, quats=quats.unsqueeze(0),
+        scales=scales.unsqueeze(0),
+        viewmats=viewmats.unsqueeze(0), Ks=Ks.unsqueeze(0),
+        width=image_width, height=image_height,
+        eps2d=eps2d, near_plane=near_plane, far_plane=far_plane,
+        radius_clip=0.0, packed=False, calc_compensations=False,
+        camera_model="pinhole", opacities=None)
+
+    # Squeeze batch dim for tile pipeline
+    radii_sq = radii.squeeze(0)        # [1, N, 2]
+    means2d_sq = means2d.squeeze(0)    # [1, N, 2]
+    depths_sq = depths.squeeze(0)      # [1, N]
+    conics_sq = conics.squeeze(0)      # [1, N, 3]
+
+    opacities_rast = opacities_3d.unsqueeze(0)  # [1, N]
+
+    tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
+        means2d_sq, radii_sq, depths_sq,
+        tile_size=tile_size,
+        tile_width=(image_width + tile_size - 1) // tile_size,
+        tile_height=(image_height + tile_size - 1) // tile_size,
+        sort=True, segmented=False, packed=False,
+        conics=None, opacities=None)
+
+    tile_width = (image_width + tile_size - 1) // tile_size
+    tile_height = (image_height + tile_size - 1) // tile_size
+
+    isect_offsets = isect_offset_encode(isect_ids, 1, tile_width, tile_height)
+
+    render_colors, render_alphas = rasterize_to_pixels(
+        means2d_sq, conics_sq, colors, opacities_rast,
+        image_width, image_height, tile_size,
+        isect_offsets, flatten_ids,
+        backgrounds=None, masks=None, packed=False, absgrad=False)
+
+    n_isects = flatten_ids.numel()
+
+    write_uint32(os.path.join(out_dir, "I.bin"), 1)
+    write_uint32(os.path.join(out_dir, "N.bin"), N)
+    write_uint32(os.path.join(out_dir, "n_isects.bin"), n_isects)
+    write_uint32(os.path.join(out_dir, "image_width.bin"), image_width)
+    write_uint32(os.path.join(out_dir, "image_height.bin"), image_height)
+    write_uint32(os.path.join(out_dir, "tile_size.bin"), tile_size)
+    write_float_tensor(os.path.join(out_dir, "means2d.bin"), means2d_sq)
+    write_float_tensor(os.path.join(out_dir, "conics.bin"), conics_sq)
+    write_float_tensor(os.path.join(out_dir, "colors.bin"), colors)
+    write_float_tensor(os.path.join(out_dir, "opacities.bin"), opacities_rast)
+    write_int32_tensor(os.path.join(out_dir, "tile_offsets.bin"), isect_offsets)
+    write_int32_tensor(os.path.join(out_dir, "flatten_ids.bin"), flatten_ids)
+    write_float_tensor(os.path.join(out_dir, "render_colors.bin"), render_colors)
+    write_float_tensor(os.path.join(out_dir, "render_alphas.bin"), render_alphas)
+
+    with open(os.path.join(out_dir, "README.md"), "w") as f:
+        f.write(
+            "# RasterizeToPixels3DGS oracle fixture\n\n"
+            f"Captured by `Scripts/CaptureGsplatOracle.py` with `seed={seed}`,\n"
+            "gsplat upstream commit 53f89aa58fdbe6bf1b442975e1e4b7d5411e94e5.\n\n"
+            f"I=1, N={N}, {image_width}x{image_height}, tile_size={tile_size}.\n"
+            "Pipeline: fully_fused_projection -> isect_tiles(sort=True) ->\n"
+            "isect_offset_encode -> rasterize_to_pixels.\n\n"
+            f"- `means2d`       [1, {N}, 2]\n"
+            f"- `conics`        [1, {N}, 3]\n"
+            f"- `colors`        [1, {N}, 3]\n"
+            f"- `opacities`     [1, {N}]\n"
+            f"- `tile_offsets`  [1, {tile_height}, {tile_width}]\n"
+            f"- `flatten_ids`   [{n_isects}]\n"
+            f"- `render_colors` [1, {image_height}, {image_width}, 3]\n"
+            f"- `render_alphas` [1, {image_height}, {image_width}, 1]\n")
+
+    print(f"  wrote RasterizeToPixels3DGS fixture: N={N} "
+          f"{image_width}x{image_height} n_isects={n_isects} -> {out_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output_root",
@@ -449,6 +558,9 @@ def main() -> int:
         seed=args.seed)
     capture_projection_ewa_3dgs_fused(
         os.path.join(args.output_root, "ProjectionEWA3DGSFused"),
+        seed=args.seed)
+    capture_rasterize_to_pixels_3dgs(
+        os.path.join(args.output_root, "RasterizeToPixels3DGS"),
         seed=args.seed)
 
     print("==> done")

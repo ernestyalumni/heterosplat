@@ -6,6 +6,7 @@ ADD_LIBRARY(HeterosplatKernels
   IntersectTile.cu
   ProjectionEWA3DGSFused.cu
   QuatScaleToCovar.cu
+  RasterizeToPixels3DGS.cu
   SphericalHarmonics.cu
   )
 

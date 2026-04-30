@@ -206,7 +206,7 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 |---|---|---|
 | 0 — Dev environment | ✅ Done 2026-04-27 | Docker image with gsplat baked in |
 | 0a — Vendor + standalone build | ✅ Done 2026-04-28 | CMake build, `Tensor` type, first vendored kernel + smoke test |
-| 0b — Torch-free launchers | 🟡 In progress (5 of 6 kernels) | `quat_scale_to_covar`, `spherical_harmonics`, `intersect_tile`, `intersect_offset`, `projection_ewa_3dgs_fused`: launchers + tests + gsplat-Python oracle checks |
+| 0b — Torch-free launchers | ✅ Done 2026-04-29 (6 of 6 kernels) | All 6 kernels: launchers + tests + gsplat-Python oracle checks |
 | 1 — Single-source train + render | Not started | — |
 | 2 — Heterogeneous + normalization + 1st custom kernel | Not started | — |
 | 3 — Viewer + 2nd custom kernel | Not started | — |
@@ -220,9 +220,9 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | `intersect_tile`        | ✅ | ✅ fwd | ✅ AABB two-pass + packed | ✅ |
 | `intersect_offset`      | ✅ | ✅ fwd | ✅ single/multi-image + zero | ✅ |
 | `projection_ewa_3dgs_fused` | ✅ | ✅ fwd + bwd | ✅ | ✅ |
-| `rasterize_to_pixels_3dgs`  | — | — | — | — |
+| `rasterize_to_pixels_3dgs`  | ✅ | ✅ fwd + bwd | ✅ | ✅ |
 
-Total tests: 34 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers the 5 done kernels.
+Total tests: 38 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers all 6 kernels.
 
 ## Appendix — files referenced
 

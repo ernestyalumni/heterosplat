@@ -75,6 +75,21 @@ ProjectionEWA3DGSFusedKernels.cuh (NEW)
     accumulation. gpuAtomicAdd is a thin ATen wrapper around atomicAdd
     for the float case used here, so the substitution is bit-equivalent.
 
+RasterizeToPixels3DGSKernels.cuh (NEW)
+  - Extracted the two templated __global__ kernels
+    rasterize_to_pixels_3dgs_fwd_kernel and
+    rasterize_to_pixels_3dgs_bwd_kernel from gsplat's
+    RasterizeToPixels3DGSFwd.cu and RasterizeToPixels3DGSBwd.cu.
+    The launch_* host wrappers, AT_DISPATCH_* macros,
+    GSPLAT_BUILD_3DGS config guard, Rasterization.h header inclusion,
+    and GSPLAT_FOR_EACH explicit template instantiations are dropped.
+    heterosplat owns the raw-pointer launchers in
+    CUDA/Heterosplat/Source/Kernels/Heterosplat/RasterizeToPixels3DGS.cu.
+  - Replaced ATen's gpuAtomicAdd (from <ATen/cuda/Atomic.cuh>) with the
+    CUDA-native atomicAdd in the backward kernel for gradient
+    accumulation. gpuAtomicAdd is a thin ATen wrapper around atomicAdd
+    for the float case used here, so the substitution is bit-equivalent.
+
 Files NOT vendored from upstream
 --------------------------------
 
