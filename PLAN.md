@@ -206,7 +206,7 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 |---|---|---|
 | 0 — Dev environment | ✅ Done 2026-04-27 | Docker image with gsplat baked in |
 | 0a — Vendor + standalone build | ✅ Done 2026-04-28 | CMake build, `Tensor` type, first vendored kernel + smoke test |
-| 0b — Torch-free launchers | ✅ Done 2026-04-29 (6 of 6 kernels) | All 6 kernels: launchers + tests + gsplat-Python oracle checks |
+| 0b — Torch-free launchers | ✅ Done 2026-04-29 | All 6 kernels + CUB glue + ForwardBackwardSmokeTest (1k Gaussians, fwd+bwd) |
 | 1 — Single-source train + render | Not started | — |
 | 2 — Heterogeneous + normalization + 1st custom kernel | Not started | — |
 | 3 — Viewer + 2nd custom kernel | Not started | — |
@@ -223,6 +223,8 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | `rasterize_to_pixels_3dgs`  | ✅ | ✅ fwd + bwd | ✅ | ✅ |
 
 Total tests: 38 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers all 6 kernels.
+
+`ForwardBackwardSmokeTest` binary chains all 6 kernels + CUB prefix sum + CUB radix sort into a single fwd+bwd pass on 1024 synthetic Gaussians (64x64 render, 16px tiles). Verifies finite non-zero gradients propagate through the full pipeline. CUB wrappers live in `Core/CubOperations.{h,cu}`.
 
 ## Appendix — files referenced
 

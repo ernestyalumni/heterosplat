@@ -100,3 +100,24 @@ FetchContent_MakeAvailable(googletest)
 ADD_SUBDIRECTORY(Core)
 ADD_SUBDIRECTORY(Kernels)
 ADD_SUBDIRECTORY(UnitTests)
+
+################################################################################
+## Forward-backward smoke test binary (Phase 0b done-criteria).
+## Chains all 6 kernels + CUB glue into a single fwd+bwd pass on synthetic
+## 1k-Gaussian data and verifies finite gradients.
+################################################################################
+
+ADD_EXECUTABLE(ForwardBackwardSmokeTest
+  ForwardBackwardSmokeTest.cu
+  )
+
+TARGET_LINK_LIBRARIES(ForwardBackwardSmokeTest
+  PRIVATE
+  Core
+  HeterosplatKernels
+  )
+
+SET_TARGET_PROPERTIES(ForwardBackwardSmokeTest
+  PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")

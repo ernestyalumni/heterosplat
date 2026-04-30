@@ -47,7 +47,8 @@ heterosplat/
     ├── Build/                             # local build dir (gitignored), `cmake ../Source`
     └── Source/
         ├── CMakeLists.txt                 # top-level
-        ├── Core/{CMakeLists.txt, Tensor.h}
+        ├── ForwardBackwardSmokeTest.cu    # Phase 0b: fwd+bwd through all 6 kernels
+        ├── Core/{CMakeLists.txt, Tensor.h, CubOperations.{h,cu}}
         ├── Kernels/
         │   ├── Thirdparty/Gsplat/         # vendored Apache-2.0 (LICENSE, NOTICE, VENDORED.md)
         │   │   ├── Common.h               # patched: torch macros stripped
@@ -115,7 +116,7 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-38 tests (`./build/Check`), all passing. Suite layout:
+38 tests (`./build/Check`), all passing. Plus `ForwardBackwardSmokeTest` binary (separate from gtest). Suite layout:
 - `Tensor.*` (10) — Core/Tensor.h
 - `IntersectOffset.*` (3) — single-image, multi-image, zero-intersections
 - `IntersectOffsetOracle.*` (1) — vs gsplat-Python
@@ -149,9 +150,9 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 ## Where to start (next concrete action)
 
-**Phase 0b is complete** — all 6 kernels are vendored, launched, and tested. Next: build the `forward_backward_smoke_test` binary that runs fwd+bwd on a 1k-Gaussian, 64x64 image fixture to close Phase 0b's done-criteria, then begin Phase 1 (single-source train + render).
+**Phase 0b is fully complete** — all 6 kernels vendored, launched, tested, and chained into `ForwardBackwardSmokeTest` (1024 Gaussians, 64x64 render, fwd+bwd with finite gradient checks). CUB prefix sum + radix sort wrappers in `Core/CubOperations.{h,cu}`.
 
-Open question worth flagging early for `rasterize_to_pixels_3dgs`: it uses tile-level cooperative groups and shared memory; check whether any helpers beyond `Common.h` / `Utils.cuh` need vendoring.
+**Next: Phase 1** — single-source train + render (`heterosplat train --colmap path/to/scene`). See PLAN.md Phase 1 done-criteria.
 
 ## Conventions
 
