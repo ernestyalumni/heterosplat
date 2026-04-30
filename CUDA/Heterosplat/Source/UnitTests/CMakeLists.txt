@@ -15,6 +15,9 @@ ADD_EXECUTABLE(Check
   Kernels/Heterosplat/QuatScaleToCovar_oracle_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_oracle_tests.cu
+  Training/Activations_tests.cu
+  Training/AdamOptimizer_tests.cu
+  Training/ImageLoss_tests.cu
   )
 
 # Tests that load oracle fixtures need an absolute path to Fixtures/ baked
@@ -34,6 +37,7 @@ TARGET_LINK_LIBRARIES(Check
   Colmap
   Core
   HeterosplatKernels
+  Training
   gtest_main
   gmock_main
   )
