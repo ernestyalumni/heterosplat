@@ -2,6 +2,7 @@
 
 ADD_LIBRARY(IO
   ImageIO.cpp
+  PlyReader.cpp
   PlyWriter.cpp
   )
 

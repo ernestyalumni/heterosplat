@@ -148,3 +148,24 @@ SET_TARGET_PROPERTIES(TrainSingleScene
   PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")
+
+################################################################################
+## RenderOrbit — renders orbit frames from a .ply file and stitches with ffmpeg.
+################################################################################
+
+ADD_EXECUTABLE(RenderOrbit
+  RenderOrbit.cu
+  )
+
+TARGET_LINK_LIBRARIES(RenderOrbit
+  PRIVATE
+  Core
+  HeterosplatKernels
+  IO
+  Training
+  )
+
+SET_TARGET_PROPERTIES(RenderOrbit
+  PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")

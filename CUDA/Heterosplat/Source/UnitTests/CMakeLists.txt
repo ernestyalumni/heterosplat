@@ -15,6 +15,7 @@ ADD_EXECUTABLE(Check
   Kernels/Heterosplat/QuatScaleToCovar_oracle_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_oracle_tests.cu
+  IO/PlyRoundTrip_tests.cu
   Training/Activations_tests.cu
   Training/AdamOptimizer_tests.cu
   Training/ImageLoss_tests.cu
@@ -37,6 +38,7 @@ TARGET_LINK_LIBRARIES(Check
   Colmap
   Core
   HeterosplatKernels
+  IO
   Training
   gtest_main
   gmock_main
