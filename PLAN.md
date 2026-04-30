@@ -207,7 +207,7 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | 0 — Dev environment | ✅ Done 2026-04-27 | Docker image with gsplat baked in |
 | 0a — Vendor + standalone build | ✅ Done 2026-04-28 | CMake build, `Tensor` type, first vendored kernel + smoke test |
 | 0b — Torch-free launchers | ✅ Done 2026-04-29 | All 6 kernels + CUB glue + ForwardBackwardSmokeTest (1k Gaussians, fwd+bwd) |
-| 1 — Single-source train + render | Not started | — |
+| 1 — Single-source train + render | 🔧 In progress | — |
 | 2 — Heterogeneous + normalization + 1st custom kernel | Not started | — |
 | 3 — Viewer + 2nd custom kernel | Not started | — |
 
@@ -222,9 +222,27 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | `projection_ewa_3dgs_fused` | ✅ | ✅ fwd + bwd | ✅ | ✅ |
 | `rasterize_to_pixels_3dgs`  | ✅ | ✅ fwd + bwd | ✅ | ✅ |
 
-Total tests: 38 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers all 6 kernels.
+Total tests: 61 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers all 6 kernels.
 
 `ForwardBackwardSmokeTest` binary chains all 6 kernels + CUB prefix sum + CUB radix sort into a single fwd+bwd pass on 1024 synthetic Gaussians (64x64 render, 16px tiles). Verifies finite non-zero gradients propagate through the full pipeline. CUB wrappers live in `Core/CubOperations.{h,cu}`.
+
+### Phase 1 sub-status (2026-04-29)
+
+| Component | Status | Notes |
+|---|---|---|
+| COLMAP binary reader | ✅ Done | cameras/images/points3D .bin, all 11 models |
+| Image IO (stb) | ✅ Done | load_image + save_image_png |
+| PLY writer | ✅ Done | Standard 3DGS format (SuperSplat/antimatter15) |
+| Adam optimizer | ✅ Done | Per-element CUDA, bias-corrected moments |
+| L1 loss | ✅ Done | Shared-memory reduction fwd + sign gradient bwd |
+| Activation kernels | ✅ Done | sigmoid/exp fwd+bwd, quat normalize, view dirs |
+| TrainSingleScene binary | ✅ Done | Full fwd+loss+bwd+Adam loop, SH degree schedule |
+| SSIM loss | Not started | Deferred — L1 sufficient for Phase 1 |
+| Orbit render | Not started | `--ply X --orbit out.mp4` with ffmpeg |
+| CLI frontend (CLI11) | Not started | Currently argv-based |
+| Densification | Not started | Out-of-scope for Phase 1 |
+
+`TrainSingleScene` binary: `./TrainSingleScene <colmap_sparse> <images_dir> [output.ply] [iters]`. Loads COLMAP, initializes Gaussians from sparse points (SH DC from colors, isotropic log-scale from bounding-box spacing), runs 30k iterations of fwd+L1_loss+bwd+Adam with coarse-to-fine SH (degree bumps every 1000 iterations). Saves .ply checkpoints every 7000 iterations.
 
 ## Appendix — files referenced
 
