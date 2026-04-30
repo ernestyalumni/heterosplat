@@ -124,3 +124,27 @@ SET_TARGET_PROPERTIES(ForwardBackwardSmokeTest
   PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")
+
+################################################################################
+## TrainSingleScene — Phase 1 training binary.
+## Loads COLMAP data, initializes Gaussians from sparse points, runs the full
+## fwd+bwd+Adam training loop, and saves a .ply file.
+################################################################################
+
+ADD_EXECUTABLE(TrainSingleScene
+  TrainSingleScene.cu
+  )
+
+TARGET_LINK_LIBRARIES(TrainSingleScene
+  PRIVATE
+  Colmap
+  Core
+  HeterosplatKernels
+  IO
+  Training
+  )
+
+SET_TARGET_PROPERTIES(TrainSingleScene
+  PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")

@@ -1,6 +1,7 @@
-# Training — optimizer kernels and loss functions.
+# Training — optimizer kernels, loss functions, and activation utilities.
 
 ADD_LIBRARY(Training
+  Activations.cu
   AdamOptimizer.cu
   ImageLoss.cu
   )
