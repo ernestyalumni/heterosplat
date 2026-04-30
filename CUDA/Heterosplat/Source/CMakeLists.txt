@@ -99,6 +99,7 @@ FetchContent_MakeAvailable(googletest)
 
 ADD_SUBDIRECTORY(Colmap)
 ADD_SUBDIRECTORY(Core)
+ADD_SUBDIRECTORY(IO)
 ADD_SUBDIRECTORY(Kernels)
 ADD_SUBDIRECTORY(UnitTests)
 
