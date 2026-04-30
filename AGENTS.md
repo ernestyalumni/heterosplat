@@ -43,12 +43,18 @@ heterosplat/
 │   ├── run_tests.sh                       # host test runner (forwards args to ./Check)
 │   ├── run_configuration.yml.example      # per-machine GPU id template (gitignored real)
 │   └── CaptureGsplatOracle.py             # captures gsplat-Python fixtures (in container)
+├── thirdparty/stb/                        # stb_image.h, stb_image_write.h
 └── CUDA/Heterosplat/
     ├── Build/                             # local build dir (gitignored), `cmake ../Source`
     └── Source/
         ├── CMakeLists.txt                 # top-level
         ├── ForwardBackwardSmokeTest.cu    # Phase 0b: fwd+bwd through all 6 kernels
+        ├── TrainSingleScene.cu            # Phase 1: full training loop binary
+        ├── RenderOrbit.cu                 # Phase 1: orbit render → PNG frames + mp4
+        ├── Colmap/{CMakeLists.txt, ColmapReader.{h,cpp}}
         ├── Core/{CMakeLists.txt, Tensor.h, CubOperations.{h,cu}}
+        ├── IO/{CMakeLists.txt, ImageIO.{h,cpp}, PlyWriter.{h,cpp}, PlyReader.{h,cpp}}
+        ├── Training/{CMakeLists.txt, AdamOptimizer.{h,cu}, ImageLoss.{h,cu}, Activations.{h,cu}}
         ├── Kernels/
         │   ├── Thirdparty/Gsplat/         # vendored Apache-2.0 (LICENSE, NOTICE, VENDORED.md)
         │   │   ├── Common.h               # patched: torch macros stripped
@@ -70,12 +76,9 @@ heterosplat/
             ├── DeviceBuffer.h             # typed GPU buffer for tests
             ├── OracleFixture.h            # tiny .bin loader
             ├── Fixtures/                  # captured gsplat-Python outputs
-            │   ├── IntersectOffset/
-            │   ├── IntersectTile/
-            │   ├── ProjectionEWA3DGSFused/
-            │   ├── QuatScaleToCovar/
-            │   ├── RasterizeToPixels3DGS/
-            │   └── SphericalHarmonics/
+            ├── Colmap/ColmapReader_tests.cu
+            ├── IO/PlyRoundTrip_tests.cu
+            ├── Training/{Activations,AdamOptimizer,ImageLoss}_tests.cu
             └── Kernels/Heterosplat/
                 ├── *_tests.cu             # closed-form + gradcheck
                 └── *_oracle_tests.cu      # vs gsplat-Python
@@ -116,20 +119,25 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-38 tests (`./build/Check`), all passing. Plus `ForwardBackwardSmokeTest` binary (separate from gtest). Suite layout:
+63 tests (`./build/Check`), all passing. Plus `ForwardBackwardSmokeTest` binary (separate from gtest). Suite layout:
+
+**Core & IO:**
 - `Tensor.*` (10) — Core/Tensor.h
-- `IntersectOffset.*` (3) — single-image, multi-image, zero-intersections
-- `IntersectOffsetOracle.*` (1) — vs gsplat-Python
-- `IntersectTile.*` (2) — dense AABB two-pass + packed image-id encoding
-- `IntersectTileOracle.*` (1) — vs gsplat-Python, dense AABB fwd
-- `ProjectionEWA3DGSFused.*` (3) — on-axis center, behind-camera cull, backward finite grads
-- `ProjectionEWA3DGSFusedOracle.*` (1) — vs gsplat-Python, fwd
-- `QuatScaleToCovar.*` (5) — closed-form forward × 3, closed-form backward, gradcheck backward
-- `QuatScaleToCovarOracle.*` (2) — vs gsplat-Python, fwd + bwd
-- `RasterizeToPixels3DGS.*` (3) — single Gaussian center, zero intersections, backward finite grads
-- `RasterizeToPixels3DGSOracle.*` (1) — vs gsplat-Python, fwd
-- `SphericalHarmonics.*` (4) — DC, single-basis, mask, gradcheck
-- `SphericalHarmonicsOracle.*` (2) — vs gsplat-Python, fwd + bwd
+- `ColmapReader.*` (9) — COLMAP binary reader
+- `PlyRoundTrip.*` (2) — write then read, degree 0 + degree 3
+
+**Kernels (Phase 0b):**
+- `IntersectOffset.*` (3) + `IntersectOffsetOracle.*` (1)
+- `IntersectTile.*` (2) + `IntersectTileOracle.*` (1)
+- `ProjectionEWA3DGSFused.*` (3) + `ProjectionEWA3DGSFusedOracle.*` (1)
+- `QuatScaleToCovar.*` (5) + `QuatScaleToCovarOracle.*` (2)
+- `RasterizeToPixels3DGS.*` (3) + `RasterizeToPixels3DGSOracle.*` (1)
+- `SphericalHarmonics.*` (4) + `SphericalHarmonicsOracle.*` (2)
+
+**Training (Phase 1):**
+- `Activations.*` (6) — sigmoid/exp fwd+bwd, quat normalize, view dirs
+- `AdamOptimizer.*` (3) — single step, multi-step momentum, zero grad
+- `ImageLoss.*` (5) — L1 forward/backward, identity, null grad
 
 ## Adding the next kernel (the slice pattern)
 
@@ -152,7 +160,12 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 **Phase 0b is fully complete** — all 6 kernels vendored, launched, tested, and chained into `ForwardBackwardSmokeTest` (1024 Gaussians, 64x64 render, fwd+bwd with finite gradient checks). CUB prefix sum + radix sort wrappers in `Core/CubOperations.{h,cu}`.
 
-**Next: Phase 1** — single-source train + render (`heterosplat train --colmap path/to/scene`). See PLAN.md Phase 1 done-criteria.
+**Phase 1 training pipeline is built.** Core components:
+- `TrainSingleScene` binary: `./TrainSingleScene <colmap_sparse> <images_dir> [output.ply] [iters]`
+- `RenderOrbit` binary: `./RenderOrbit <input.ply> [output_dir] [frames] [width] [height]`
+- COLMAP reader, image IO (stb), PLY reader/writer, Adam optimizer, L1 loss, activation kernels (sigmoid/exp fwd+bwd, quat normalize, view directions)
+
+**Next steps:** test on real COLMAP data, add CLI11 frontend, add SSIM loss.
 
 ## Conventions
 
