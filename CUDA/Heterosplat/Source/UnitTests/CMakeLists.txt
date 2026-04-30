@@ -1,6 +1,7 @@
 ENABLE_TESTING()
 
 ADD_EXECUTABLE(Check
+  Colmap/ColmapReader_tests.cu
   Core/Tensor_tests.cu
   Kernels/Heterosplat/IntersectOffset_tests.cu
   Kernels/Heterosplat/IntersectOffset_oracle_tests.cu
@@ -30,6 +31,7 @@ TARGET_INCLUDE_DIRECTORIES(Check
 
 TARGET_LINK_LIBRARIES(Check
   PRIVATE
+  Colmap
   Core
   HeterosplatKernels
   gtest_main

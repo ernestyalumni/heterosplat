@@ -97,6 +97,7 @@ FetchContent_MakeAvailable(googletest)
 ## Sub-modules
 ################################################################################
 
+ADD_SUBDIRECTORY(Colmap)
 ADD_SUBDIRECTORY(Core)
 ADD_SUBDIRECTORY(Kernels)
 ADD_SUBDIRECTORY(UnitTests)
