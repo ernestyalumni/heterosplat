@@ -1,12 +1,13 @@
+#include "DeviceBuffer.h"
 #include "Kernels/Heterosplat/IntersectTile.h"
 #include "OracleFixture.h"
 
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-#include <stdexcept>
 #include <vector>
 
+using GoogleUnitTests::DeviceBuffer;
 using Kernels::Heterosplat::launch_intersect_tile_forward;
 using GoogleUnitTests::OracleFixture::fixture_path;
 using GoogleUnitTests::OracleFixture::load_floats;
@@ -20,59 +21,6 @@ namespace Kernels
 {
 namespace Heterosplat
 {
-
-namespace
-{
-
-template <typename T>
-class DeviceBuffer
-{
-  public:
-    explicit DeviceBuffer(const std::size_t count):
-      count_{count}
-    {
-      const cudaError_t status {
-        cudaMalloc(reinterpret_cast<void**>(&data_), count_ * sizeof(T))};
-      if (status != cudaSuccess)
-      {
-        throw std::runtime_error{cudaGetErrorString(status)};
-      }
-    }
-
-    DeviceBuffer(const DeviceBuffer&) = delete;
-    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
-
-    ~DeviceBuffer()
-    {
-      cudaFree(data_);
-    }
-
-    void copy_from_host(const std::vector<T>& host)
-    {
-      ASSERT_EQ(host.size(), count_);
-      ASSERT_EQ(
-        cudaMemcpy(data_, host.data(), count_ * sizeof(T), cudaMemcpyHostToDevice),
-        cudaSuccess);
-    }
-
-    std::vector<T> copy_to_host() const
-    {
-      std::vector<T> host(count_);
-      EXPECT_EQ(
-        cudaMemcpy(host.data(), data_, count_ * sizeof(T), cudaMemcpyDeviceToHost),
-        cudaSuccess);
-      return host;
-    }
-
-    T* data() { return data_; }
-    const T* data() const { return data_; }
-
-  private:
-    T* data_ {nullptr};
-    std::size_t count_ {0};
-};
-
-} // namespace
 
 //------------------------------------------------------------------------------
 /// Oracle comparison against gsplat-Python's `isect_tiles(..., sort=False)`.

@@ -27,6 +27,7 @@ import sys
 
 import torch
 from gsplat.cuda._wrapper import (
+    isect_offset_encode,
     isect_tiles,
     quat_scale_to_covar_preci,
     spherical_harmonics,
@@ -268,6 +269,77 @@ def capture_intersect_tile(out_dir: str, seed: int = 42) -> None:
           f"N={number_of_gaussians} n_isects={isect_ids.numel()} -> {out_dir}")
 
 
+def capture_intersect_offset(out_dir: str, seed: int = 42) -> None:
+    """Forward fixture for intersect_offset using sorted isect_ids from isect_tiles."""
+    os.makedirs(out_dir, exist_ok=True)
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    number_of_images = 2
+    number_of_gaussians = 6
+    tile_size = 8
+    tile_width = 5
+    tile_height = 4
+
+    means2d = torch.rand(
+        number_of_images, number_of_gaussians, 2,
+        generator=generator, device="cuda", dtype=torch.float32)
+    means2d[..., 0] *= tile_width * tile_size
+    means2d[..., 1] *= tile_height * tile_size
+
+    radii = torch.randint(
+        1, 8, (number_of_images, number_of_gaussians, 2),
+        generator=generator, device="cuda", dtype=torch.int32)
+    radii[0, 1, 0] = 0
+
+    depths = (
+        torch.rand(
+            number_of_images, number_of_gaussians,
+            generator=generator, device="cuda", dtype=torch.float32) * 4.0
+        + 0.25)
+
+    _tiles_per_gauss, isect_ids_sorted, _flatten_ids = isect_tiles(
+        means2d,
+        radii,
+        depths,
+        tile_size=tile_size,
+        tile_width=tile_width,
+        tile_height=tile_height,
+        sort=True,
+        segmented=False,
+        packed=False,
+        conics=None,
+        opacities=None)
+
+    offsets = isect_offset_encode(
+        isect_ids_sorted, number_of_images, tile_width, tile_height)
+
+    n_isects = isect_ids_sorted.numel()
+
+    write_uint32(os.path.join(out_dir, "I.bin"), number_of_images)
+    write_uint32(os.path.join(out_dir, "n_tiles.bin"), tile_width * tile_height)
+    write_uint32(os.path.join(out_dir, "tile_width.bin"), tile_width)
+    write_uint32(os.path.join(out_dir, "tile_height.bin"), tile_height)
+    write_uint32(os.path.join(out_dir, "n_isects.bin"), n_isects)
+    write_int64_tensor(os.path.join(out_dir, "isect_ids_sorted.bin"),
+                       isect_ids_sorted)
+    write_int32_tensor(os.path.join(out_dir, "offsets.bin"), offsets)
+
+    with open(os.path.join(out_dir, "README.md"), "w") as f:
+        f.write(
+            "# IntersectOffset oracle fixture\n\n"
+            f"Captured by `Scripts/CaptureGsplatOracle.py` with `seed={seed}`,\n"
+            "gsplat upstream commit 53f89aa58fdbe6bf1b442975e1e4b7d5411e94e5.\n\n"
+            "The sorted `isect_ids` come from `isect_tiles(..., sort=True)`,\n"
+            "then `isect_offset_encode()` produces the offsets.\n\n"
+            "Integer buffers are raw little-endian int32 or int64;\n"
+            "shape scalars are little-endian uint32. Shapes:\n\n"
+            f"- `isect_ids_sorted` [{n_isects}]\n"
+            f"- `offsets`          [{number_of_images}, {tile_height}, {tile_width}]\n")
+
+    print(f"  wrote IntersectOffset fixture: I={number_of_images} "
+          f"n_isects={n_isects} -> {out_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output_root",
@@ -292,6 +364,9 @@ def main() -> int:
         seed=args.seed)
     capture_intersect_tile(
         os.path.join(args.output_root, "IntersectTile"),
+        seed=args.seed)
+    capture_intersect_offset(
+        os.path.join(args.output_root, "IntersectOffset"),
         seed=args.seed)
 
     print("==> done")

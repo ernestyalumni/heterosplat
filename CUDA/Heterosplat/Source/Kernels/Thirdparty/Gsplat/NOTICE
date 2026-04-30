@@ -49,10 +49,18 @@ IntersectTileKernels.cuh (NEW)
   - Extracted the AccuTile/SNUGBOX device helpers and the templated
     intersect_tile_kernel from gsplat's IntersectTile.cu.
   - Dropped the ATen launch_intersect_tile_kernel host wrapper,
-    AT_DISPATCH_FLOATING_TYPES dispatch, CUB radix-sort helpers, and
-    intersect_offset kernel. heterosplat owns the raw-pointer launcher in
+    AT_DISPATCH_FLOATING_TYPES dispatch, and CUB radix-sort helpers.
+    heterosplat owns the raw-pointer launcher in
     CUDA/Heterosplat/Source/Kernels/Heterosplat/IntersectTile.cu and keeps
     sorting/prefix-sum storage explicit at the caller boundary.
+
+IntersectOffsetKernels.cuh (NEW)
+  - Extracted the __global__ intersect_offset_kernel from gsplat's
+    IntersectTile.cu. This kernel converts sorted intersection ids into
+    per-image/per-tile offsets.
+  - Dropped the ATen launch_intersect_offset_kernel host wrapper.
+    heterosplat owns the raw-pointer launcher in
+    CUDA/Heterosplat/Source/Kernels/Heterosplat/IntersectOffset.cu.
 
 Files NOT vendored from upstream
 --------------------------------
@@ -60,9 +68,8 @@ Files NOT vendored from upstream
   - QuatScaleToCovar.cpp / QuatScaleToCovar.h (torch boundary; replaced).
   - QuatScaleToCovarCUDA.cu's launch_* host functions (replaced).
   - Intersect.cpp / Intersect.h (torch boundary; replaced).
-  - IntersectTile.cu's launch_* host function, CUB radix-sort helpers, and
-    intersect_offset kernel (replaced or scheduled as separate raw-pointer
-    slices).
+  - IntersectTile.cu's launch_* host functions and CUB radix-sort helpers
+    (replaced by raw-pointer launchers).
   - 2DGS / 3DGUT / lidar / external-distortion / camera-wrappers kernels
     (out of scope for heterosplat — see PLAN.md done-criteria).
 

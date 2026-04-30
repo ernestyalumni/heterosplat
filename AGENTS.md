@@ -53,13 +53,20 @@ heterosplat/
         │   │   ├── Common.h               # patched: torch macros stripped
         │   │   ├── Config.h, Utils.cuh    # verbatim
         │   │   ├── QuatScaleToCovarKernels.cuh
-        │   │   └── SphericalHarmonicsKernels.cuh   (gpuAtomicAdd → atomicAdd)
+        │   │   ├── SphericalHarmonicsKernels.cuh   (gpuAtomicAdd → atomicAdd)
+        │   │   ├── IntersectTileKernels.cuh
+        │   │   └── IntersectOffsetKernels.cuh
         │   └── Heterosplat/               # our raw-pointer launchers
+        │       ├── IntersectOffset.{h,cu}
+        │       ├── IntersectTile.{h,cu}
         │       ├── QuatScaleToCovar.{h,cu}
         │       └── SphericalHarmonics.{h,cu}
         └── UnitTests/                     # single Check executable, gtest_discover
+            ├── DeviceBuffer.h             # typed GPU buffer for tests
             ├── OracleFixture.h            # tiny .bin loader
-            ├── Fixtures/                  # captured gsplat-Python outputs (raw float32)
+            ├── Fixtures/                  # captured gsplat-Python outputs
+            │   ├── IntersectOffset/
+            │   ├── IntersectTile/
             │   ├── QuatScaleToCovar/
             │   └── SphericalHarmonics/
             └── Kernels/Heterosplat/
@@ -102,8 +109,10 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-26 tests (`./build/Check`), all passing. Suite layout:
+30 tests (`./build/Check`), all passing. Suite layout:
 - `Tensor.*` (10) — Core/Tensor.h
+- `IntersectOffset.*` (3) — single-image, multi-image, zero-intersections
+- `IntersectOffsetOracle.*` (1) — vs gsplat-Python
 - `IntersectTile.*` (2) — dense AABB two-pass + packed image-id encoding
 - `IntersectTileOracle.*` (1) — vs gsplat-Python, dense AABB fwd
 - `QuatScaleToCovar.*` (5) — closed-form forward × 3, closed-form backward, gradcheck backward
@@ -130,7 +139,7 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 ## Where to start (next concrete action)
 
-**Phase 0b kernel #4: `intersect_offset`** (forward only — no backward path in PLAN.md table). It consumes sorted `isect_ids` and writes per-image/per-tile offsets. After that, the heavy two are `projection_ewa_3dgs_fused` (fwd+bwd) and `rasterize_to_pixels_3dgs` (fwd+bwd). Once all six are wired, the `forward_backward_smoke_test` binary closes Phase 0b's done-criteria.
+**Phase 0b kernel #5: `projection_ewa_3dgs_fused`** (fwd + bwd). This is the first of the two heavy kernels: 3D-to-2D EWA projection with fused covariance. After this, `rasterize_to_pixels_3dgs` (fwd+bwd). Once all six are wired, the `forward_backward_smoke_test` binary closes Phase 0b's done-criteria.
 
 Open question worth flagging early for `rasterize_to_pixels_3dgs`: it uses tile-level cooperative groups and shared memory; check whether any helpers beyond `Common.h` / `Utils.cuh` need vendoring.
 

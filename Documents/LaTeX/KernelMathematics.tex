@@ -765,13 +765,112 @@ seeded gsplat-Python fixture captured with \texttt{isect\_tiles(...,
 sort=False)} and checks both passes exactly. Sorting is intentionally
 outside this launcher; a later CUB utility will own that boundary.
 
+\section{Tile-offset encoding}
+\label{sec:intersect-offset}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel (extracted from upstream gsplat):\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/IntersectOffsetKernels.cuh}
+  \item Raw-pointer launcher owned by heterosplat:\\
+  \texttt{Source/Kernels/Heterosplat/IntersectOffset.\{h,cu\}}
+  \item Tests and oracle fixtures:\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/IntersectOffset\_tests.cu}\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/IntersectOffset\_oracle\_tests.cu}\\
+  \texttt{Source/UnitTests/Fixtures/IntersectOffset/}
+\end{itemize}
+
+\subsection{The forward map}
+
+The tile-offset kernel converts a \emph{sorted} array of intersection
+ids (output of \texttt{intersect\_tile} followed by radix sort) into a
+per-image, per-tile offset array. The rasterizer later uses these
+offsets to locate the Gaussians that contribute to each tile.
+
+\paragraph{Input.}
+A sorted array of $M$ intersection ids, each a signed 64-bit integer
+whose upper 32~bits encode the composite key
+\[
+  k_j = i_j \cdot T + t_j,
+\]
+where $i_j$ is the image index, $t_j$ is the tile index within image
+$i_j$, $T = W_t H_t$ is the total number of tiles per image, and
+$W_t$, $H_t$ are the tile grid width and height. The lower 32~bits
+carry depth and are ignored by this kernel. The array is sorted in
+ascending order of $k_j$.
+
+\paragraph{Output.}
+An offset array $O$ of length $I \cdot T$, where $I$ is the number of
+images. Each entry
+\[
+  O[i \cdot T + t] = \min \{ j : k_j \ge i \cdot T + t \}
+\]
+gives the index of the first intersection belonging to image~$i$,
+tile~$t$ in the sorted intersection array. If no intersection exists
+for that (image, tile) pair, the offset equals that of the next
+non-empty slot, or $M$ for all trailing empty slots.
+
+Equivalently, the half-open range of intersections for (image, tile)
+pair $(i,t)$ is $[O[i T + t],\; O[i T + t + 1])$, where $O[I T]$
+is implicitly~$M$.
+
+\paragraph{Algorithm.}
+Each CUDA thread handles one intersection~$j$. It decodes $k_j$ from
+the upper 32 bits and, for the boundary cases:
+\begin{enumerate}
+  \item Thread 0 fills $O[0..k_0]$ with 0.
+  \item Thread $M{-}1$ fills $O[k_{M-1}{+}1 .. IT{-}1]$ with $M$.
+  \item All other threads compare $k_j$ to $k_{j-1}$; if they differ,
+  fill $O[k_{j-1}{+}1 .. k_j]$ with $j$.
+\end{enumerate}
+This is a standard histogram-to-offset conversion (equivalent to an
+exclusive scan of the histogram), executed in $O(M)$ total writes.
+No backward pass is needed.
+
+\subsection{Launcher API correspondence}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{n\_isects} & $M$ & Total number of sorted intersections. \\
+\texttt{isect\_ids} & $\{k_j\}$ & Sorted intersection ids (upper 32
+bits = composite key). \\
+\texttt{I} & $I$ & Number of images. \\
+\texttt{tile\_width} & $W_t$ & Tile grid width. \\
+\texttt{tile\_height} & $H_t$ & Tile grid height. \\
+\texttt{offsets} & $O$ & Output offset array, $[I \cdot T]$. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+When $M = 0$ (no intersections), the launcher zeros the entire output
+array via \texttt{cudaMemsetAsync} without launching the kernel.
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{IntersectOffset\_tests.cu} cover:
+\begin{enumerate}
+  \item \emph{Single image, 2$\times$2 grid}: 3 intersections
+  touching tiles 0, 1, 1. Verifies offsets $[0, 1, 3, 3]$.
+  \item \emph{Multi-image}: 2 images, 2$\times$1 grid, verifying
+  correct image-boundary encoding in the offset array.
+  \item \emph{Zero intersections}: confirms the launcher zeros all
+  offsets when the input is empty.
+\end{enumerate}
+The oracle test in \texttt{IntersectOffset\_oracle\_tests.cu} replays
+a seeded gsplat-Python fixture captured with
+\texttt{isect\_offset\_encode()} on sorted ids from
+\texttt{isect\_tiles(..., sort=True)} and checks exact equality.
+
 \section{Future sections}
 
 This document grows one section per kernel as Phase 0b adds them:
-\texttt{intersect\_offset}, EWA projection, and the tile-rasterizer
-(forward + backward). Each follows the same template: source-file
-pointers, the forward map in coordinate-free form, the VJP
-derivation when applicable, the launcher API correspondence, and the
-test correspondence.
+EWA projection and the tile-rasterizer (forward + backward). Each
+follows the same template: source-file pointers, the forward map in
+coordinate-free form, the VJP derivation when applicable, the
+launcher API correspondence, and the test correspondence.
 
 \end{document}

@@ -13,7 +13,8 @@ License: Apache 2.0 (see `LICENSE`, `NOTICE`).
 | `Utils.cuh` | upstream `cuda/include/Utils.cuh` | as-is |
 | `QuatScaleToCovarKernels.cuh` | extracted from `cuda/csrc/QuatScaleToCovarCUDA.cu` | **patched** — only `__global__` templates kept; launchers dropped |
 | `SphericalHarmonicsKernels.cuh` | extracted from `cuda/csrc/SphericalHarmonicsCUDA.cu` | **patched** — `__device__` helpers + `__global__` templates kept; launchers dropped; `gpuAtomicAdd` → `atomicAdd` |
-| `IntersectTileKernels.cuh` | extracted from `cuda/csrc/IntersectTile.cu` | **patched** — AccuTile helpers + `intersect_tile_kernel` kept; ATen launcher, CUB sort helpers, and `intersect_offset` dropped |
+| `IntersectTileKernels.cuh` | extracted from `cuda/csrc/IntersectTile.cu` | **patched** — AccuTile helpers + `intersect_tile_kernel` kept; ATen launcher and CUB sort helpers dropped |
+| `IntersectOffsetKernels.cuh` | extracted from `cuda/csrc/IntersectTile.cu` | **patched** — only `intersect_offset_kernel` kept; ATen launcher dropped |
 
 ## What's NOT here (and why)
 
