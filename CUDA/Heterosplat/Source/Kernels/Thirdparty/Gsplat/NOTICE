@@ -62,6 +62,19 @@ IntersectOffsetKernels.cuh (NEW)
     heterosplat owns the raw-pointer launcher in
     CUDA/Heterosplat/Source/Kernels/Heterosplat/IntersectOffset.cu.
 
+ProjectionEWA3DGSFusedKernels.cuh (NEW)
+  - Extracted the two templated __global__ kernels
+    projection_ewa_3dgs_fused_fwd_kernel and
+    projection_ewa_3dgs_fused_bwd_kernel from gsplat's
+    ProjectionEWA3DGSFused.cu. The launch_* host functions,
+    AT_DISPATCH_* macros, and the GSPLAT_BUILD_3DGS preprocessor guard
+    are dropped — replaced by raw-pointer launchers in
+    CUDA/Heterosplat/Source/Kernels/Heterosplat/ProjectionEWA3DGSFused.cu.
+  - Replaced ATen's gpuAtomicAdd (from <ATen/cuda/Atomic.cuh>) with the
+    CUDA-native atomicAdd in the backward kernel for gradient
+    accumulation. gpuAtomicAdd is a thin ATen wrapper around atomicAdd
+    for the float case used here, so the substitution is bit-equivalent.
+
 Files NOT vendored from upstream
 --------------------------------
 

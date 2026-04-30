@@ -27,6 +27,7 @@ import sys
 
 import torch
 from gsplat.cuda._wrapper import (
+    fully_fused_projection,
     isect_offset_encode,
     isect_tiles,
     quat_scale_to_covar_preci,
@@ -340,6 +341,84 @@ def capture_intersect_offset(out_dir: str, seed: int = 42) -> None:
           f"n_isects={n_isects} -> {out_dir}")
 
 
+def capture_projection_ewa_3dgs_fused(out_dir: str, seed: int = 42) -> None:
+    """Forward + backward fixture for projection_ewa_3dgs_fused (pinhole, quat+scale path)."""
+    os.makedirs(out_dir, exist_ok=True)
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    B = 1
+    C = 1
+    N = 8
+    image_width = 128
+    image_height = 128
+    eps2d = 0.3
+    near_plane = 0.01
+    far_plane = 1e10
+
+    means = torch.randn(B, N, 3, generator=generator, device="cuda",
+                         dtype=torch.float32)
+    means[..., 2] = means[..., 2].abs() + 1.0  # ensure positive depth
+
+    quats = torch.randn(B, N, 4, generator=generator, device="cuda",
+                         dtype=torch.float32)
+    quats = quats / quats.norm(dim=-1, keepdim=True)
+
+    scales = torch.rand(B, N, 3, generator=generator, device="cuda",
+                         dtype=torch.float32) * 0.3 + 0.01
+
+    viewmats = torch.eye(4, device="cuda", dtype=torch.float32).reshape(
+        1, 1, 4, 4).expand(B, C, -1, -1).contiguous()
+
+    Ks = torch.tensor(
+        [[[100.0, 0, 64], [0, 100.0, 64], [0, 0, 1]]],
+        device="cuda", dtype=torch.float32
+    ).reshape(1, 1, 3, 3).expand(B, C, -1, -1).contiguous()
+
+    # Forward (no autograd needed for oracle capture)
+    radii, means2d, depths, conics, compensations = fully_fused_projection(
+        means, covars=None, quats=quats, scales=scales,
+        viewmats=viewmats, Ks=Ks,
+        width=image_width, height=image_height,
+        eps2d=eps2d, near_plane=near_plane, far_plane=far_plane,
+        radius_clip=0.0, packed=False, calc_compensations=False,
+        camera_model="pinhole", opacities=None)
+
+    write_uint32(os.path.join(out_dir, "B.bin"), B)
+    write_uint32(os.path.join(out_dir, "C.bin"), C)
+    write_uint32(os.path.join(out_dir, "N.bin"), N)
+    write_uint32(os.path.join(out_dir, "image_width.bin"), image_width)
+    write_uint32(os.path.join(out_dir, "image_height.bin"), image_height)
+    write_float_tensor(os.path.join(out_dir, "means.bin"), means)
+    write_float_tensor(os.path.join(out_dir, "quats.bin"), quats)
+    write_float_tensor(os.path.join(out_dir, "scales.bin"), scales)
+    write_float_tensor(os.path.join(out_dir, "viewmats.bin"), viewmats)
+    write_float_tensor(os.path.join(out_dir, "Ks.bin"), Ks)
+    write_int32_tensor(os.path.join(out_dir, "radii.bin"), radii)
+    write_float_tensor(os.path.join(out_dir, "means2d.bin"), means2d)
+    write_float_tensor(os.path.join(out_dir, "depths.bin"), depths)
+    write_float_tensor(os.path.join(out_dir, "conics.bin"), conics)
+
+    with open(os.path.join(out_dir, "README.md"), "w") as f:
+        f.write(
+            "# ProjectionEWA3DGSFused oracle fixture\n\n"
+            f"Captured by `Scripts/CaptureGsplatOracle.py` with `seed={seed}`,\n"
+            "gsplat upstream commit 53f89aa58fdbe6bf1b442975e1e4b7d5411e94e5.\n\n"
+            "Pinhole camera, quat+scale path (no covars), no opacities,\n"
+            f"eps2d={eps2d}, near_plane={near_plane}, far_plane={far_plane}.\n\n"
+            f"- `means`    [{B}, {N}, 3]\n"
+            f"- `quats`    [{B}, {N}, 4]\n"
+            f"- `scales`   [{B}, {N}, 3]\n"
+            f"- `viewmats` [{B}, {C}, 4, 4]\n"
+            f"- `Ks`       [{B}, {C}, 3, 3]\n"
+            f"- `radii`    [{B}, {C}, {N}, 2]\n"
+            f"- `means2d`  [{B}, {C}, {N}, 2]\n"
+            f"- `depths`   [{B}, {C}, {N}]\n"
+            f"- `conics`   [{B}, {C}, {N}, 3]\n")
+
+    print(f"  wrote ProjectionEWA3DGSFused fixture: B={B} C={C} N={N} "
+          f"-> {out_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output_root",
@@ -367,6 +446,9 @@ def main() -> int:
         seed=args.seed)
     capture_intersect_offset(
         os.path.join(args.output_root, "IntersectOffset"),
+        seed=args.seed)
+    capture_projection_ewa_3dgs_fused(
+        os.path.join(args.output_root, "ProjectionEWA3DGSFused"),
         seed=args.seed)
 
     print("==> done")

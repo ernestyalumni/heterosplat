@@ -15,6 +15,7 @@ License: Apache 2.0 (see `LICENSE`, `NOTICE`).
 | `SphericalHarmonicsKernels.cuh` | extracted from `cuda/csrc/SphericalHarmonicsCUDA.cu` | **patched** — `__device__` helpers + `__global__` templates kept; launchers dropped; `gpuAtomicAdd` → `atomicAdd` |
 | `IntersectTileKernels.cuh` | extracted from `cuda/csrc/IntersectTile.cu` | **patched** — AccuTile helpers + `intersect_tile_kernel` kept; ATen launcher and CUB sort helpers dropped |
 | `IntersectOffsetKernels.cuh` | extracted from `cuda/csrc/IntersectTile.cu` | **patched** — only `intersect_offset_kernel` kept; ATen launcher dropped |
+| `ProjectionEWA3DGSFusedKernels.cuh` | extracted from `cuda/csrc/ProjectionEWA3DGSFused.cu` | **patched** — fwd + bwd `__global__` templates kept; ATen launchers and `GSPLAT_BUILD_3DGS` guard dropped; `gpuAtomicAdd` → `atomicAdd` |
 
 ## What's NOT here (and why)
 

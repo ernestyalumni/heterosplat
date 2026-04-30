@@ -865,10 +865,286 @@ a seeded gsplat-Python fixture captured with
 \texttt{isect\_offset\_encode()} on sorted ids from
 \texttt{isect\_tiles(..., sort=True)} and checks exact equality.
 
+\section{EWA projection (fused 3D-to-2D)}
+\label{sec:projection}
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item Vendored kernel templates (extracted from upstream gsplat):\\
+  \texttt{Source/Kernels/Thirdparty/Gsplat/ProjectionEWA3DGSFusedKernels.cuh}
+  (patched: \texttt{gpuAtomicAdd} $\to$ \texttt{atomicAdd}; ATen
+  launchers and \texttt{GSPLAT\_BUILD\_3DGS} guard dropped).
+  \item Raw-pointer launchers owned by heterosplat:\\
+  \texttt{Source/Kernels/Heterosplat/ProjectionEWA3DGSFused.\{h,cu\}}.
+  \item Tests and oracle fixtures:\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/ProjectionEWA3DGSFused\_tests.cu}\\
+  \texttt{Source/UnitTests/Kernels/Heterosplat/ProjectionEWA3DGSFused\_oracle\_tests.cu}\\
+  \texttt{Source/UnitTests/Fixtures/ProjectionEWA3DGSFused/}
+\end{itemize}
+
+\subsection{The forward map}
+
+The EWA projection kernel is the bridge between 3D Gaussians and the
+2D tile rasterizer. For each Gaussian $n$ in batch $b$ viewed by
+camera $c$, the kernel produces a projected 2D mean, an inverse 2D
+covariance (the ``conic''), a depth, and pixel-space bounding radii.
+
+\paragraph{Step 1: World to camera.}
+Given a world-space mean $\mu_w \in \R^3$ and the camera extrinsics
+$(R, t)$ extracted from a $4 \times 4$ row-major view matrix,
+\begin{equation}
+  \mu_c = R\, \mu_w + t.
+  \label{eq:posw2c}
+\end{equation}
+If $\mu_c^z \notin [\texttt{near\_plane},\, \texttt{far\_plane}]$,
+the Gaussian is culled (radii set to zero).
+
+The 3D covariance transforms as
+\begin{equation}
+  \Sigma_c = R\, \Sigma_w\, R^T,
+  \label{eq:covarw2c}
+\end{equation}
+where $\Sigma_w$ is either provided directly (triu-6 layout) or
+computed from $(q, s)$ via the map in \S\ref{sec:qsc}.
+
+\paragraph{Step 2: Perspective projection (pinhole).}
+For a pinhole camera with intrinsics $f_x, f_y, c_x, c_y$, the
+projected 2D mean is
+\begin{equation}
+  \mu_{2d} = \begin{pmatrix}
+    f_x\, \mu_c^x / \mu_c^z + c_x \\
+    f_y\, \mu_c^y / \mu_c^z + c_y
+  \end{pmatrix}.
+  \label{eq:persp-mean}
+\end{equation}
+The 2D covariance under the EWA (Elliptical Weighted Average)
+approximation is
+\begin{equation}
+  \Sigma_{2d} = J\, \Sigma_c\, J^T,
+  \label{eq:ewa}
+\end{equation}
+where $J \in \R^{2 \times 3}$ is the Jacobian of the pinhole map at
+$\mu_c$:
+\begin{equation}
+  J = \frac{1}{\mu_c^z}
+  \begin{pmatrix}
+    f_x & 0 & -f_x\, \mu_c^x / \mu_c^z \\
+    0 & f_y & -f_y\, \mu_c^y / \mu_c^z
+  \end{pmatrix}.
+  \label{eq:persp-jacobian}
+\end{equation}
+The kernel also supports orthographic and fisheye camera models via
+a \texttt{camera\_model} enum, but the pinhole path is the one
+exercised by all current tests.
+
+\paragraph{Step 3: Anti-aliasing blur.}
+To prevent singular conics when a Gaussian projects to sub-pixel
+size, the kernel adds an isotropic blur:
+\begin{equation}
+  \Sigma_{2d}' = \Sigma_{2d} + \epsilon^2\, I_2,
+  \label{eq:blur}
+\end{equation}
+where $\epsilon = \texttt{eps2d}$ (default $0.3$~px). The
+compensation factor
+\begin{equation}
+  \kappa = \sqrt{\frac{\det \Sigma_{2d}}{\det \Sigma_{2d}'}},
+  \label{eq:compensation}
+\end{equation}
+optionally written to \texttt{compensations}, can be applied to
+opacity to preserve the integral of the Gaussian.
+
+\paragraph{Step 4: Conic and radii.}
+The conic (inverse 2D covariance) is
+\begin{equation}
+  Q = (\Sigma_{2d}')^{-1} =
+  \begin{pmatrix} a & b \\ b & c \end{pmatrix},
+  \label{eq:conic}
+\end{equation}
+stored as the upper triangle $(a, b, c)$. The tight pixel-space
+bounding radii are
+\begin{equation}
+  r_x = \lceil \sigma_{\max} \sqrt{\Sigma_{2d,11}'} \rceil,
+  \qquad
+  r_y = \lceil \sigma_{\max} \sqrt{\Sigma_{2d,22}'} \rceil,
+  \label{eq:radii}
+\end{equation}
+where $\sigma_{\max}$ is \texttt{GAUSSIAN\_EXTEND} ($3.33\sigma$) or
+an opacity-aware tighter bound from~\cite{ye2024absgs}.
+
+\subsection{Storage layout}
+
+\begin{itemize}
+  \item \texttt{means} --- $[B, N, 3]$ row-major world-space positions.
+  \item \texttt{covars} --- $[B, N, 6]$ upper-triangle 3D covariance
+  (optional; mutually exclusive with \texttt{quats}+\texttt{scales}).
+  \item \texttt{quats}, \texttt{scales} --- $[B, N, 4]$ and $[B, N, 3]$
+  (optional; mutually exclusive with \texttt{covars}).
+  \item \texttt{viewmats} --- $[B, C, 4, 4]$ row-major extrinsics.
+  \item \texttt{Ks} --- $[B, C, 3, 3]$ row-major intrinsics
+  ($f_x = K_{00}$, $f_y = K_{11}$, $c_x = K_{02}$, $c_y = K_{12}$).
+  \item \texttt{radii} --- $[B, C, N, 2]$ output, $(r_x, r_y)$ per
+  Gaussian; $(0, 0)$ signals culled.
+  \item \texttt{means2d} --- $[B, C, N, 2]$ projected centres.
+  \item \texttt{depths} --- $[B, C, N]$ camera-space depth $\mu_c^z$.
+  \item \texttt{conics} --- $[B, C, N, 3]$ upper triangle of $Q$.
+\end{itemize}
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (forward)}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math symbol} & \textbf{Meaning} \\
+\hline
+\texttt{B}, \texttt{C}, \texttt{N} & $B, C, N$ &
+Batch size, camera count, Gaussian count. One CUDA thread per
+$(b, c, n)$ triple. \\
+\texttt{means} & $\{\mu_w\}$ & World-space means, $[B,N,3]$. \\
+\texttt{covars} & $\{\Sigma_w\}$ & Optional triu-6 3D covariance. \\
+\texttt{quats}, \texttt{scales} & $\{q\}, \{s\}$ & Alternative
+covariance input via the $(q,s) \to \Sigma$ map (\S\ref{sec:qsc}). \\
+\texttt{opacities} & $\{\alpha\}$ & Optional $[B,N]$; enables
+opacity-aware radius tightening. \\
+\texttt{viewmats} & $(R, t)$ & Camera extrinsics, $[B,C,4,4]$. \\
+\texttt{Ks} & $f_x, f_y, c_x, c_y$ & Camera intrinsics, $[B,C,3,3]$. \\
+\texttt{image\_width/height} & $W, H$ & Used for out-of-bounds culling. \\
+\texttt{eps2d} & $\epsilon$ & Anti-aliasing blur radius~\eqref{eq:blur}. \\
+\texttt{near\_plane}, \texttt{far\_plane} & --- & Depth culling range. \\
+\texttt{radius\_clip} & --- & Minimum radius; Gaussians with both
+$r_x, r_y \le$ this are culled. \\
+\texttt{camera\_model} & --- & $0$=pinhole, $1$=ortho, $2$=fisheye. \\
+\texttt{radii} & $r_x, r_y$ & Output bounding radii. \\
+\texttt{means2d} & $\mu_{2d}$ & Output projected means. \\
+\texttt{depths} & $\mu_c^z$ & Output depth. \\
+\texttt{conics} & $Q$ & Output inverse 2D covariance (upper tri). \\
+\texttt{compensations} & $\kappa$ & Optional blur compensation. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{The backward map (VJP)}
+\label{sec:projection-bwd}
+
+The backward kernel reverses the forward chain, threading gradients
+$v_{\mu_{2d}}, v_z, v_Q$ (and optionally $v_\kappa$) back to the
+inputs. The key VJP steps, in reverse order:
+
+\paragraph{Conic inversion.}
+For $Q = \Sigma^{-1}$, the matrix-inverse VJP gives
+\begin{equation}
+  v_{\Sigma_{2d}'} = -Q^T\, v_Q\, Q^T.
+  \label{eq:inv-vjp}
+\end{equation}
+The kernel receives $Q$ from the forward pass (stored in
+\texttt{conics}), so no matrix inversion is repeated.
+
+\paragraph{EWA projection.}
+The VJP of $\Sigma_{2d} = J \Sigma_c J^T$ and
+$\mu_{2d} = \pi(\mu_c)$ produces $v_{\mu_c}$ and $v_{\Sigma_c}$.
+For pinhole, the Jacobian~\eqref{eq:persp-jacobian} is
+recomputed from the saved camera-space mean.
+
+\paragraph{World-to-camera transform.}
+From~\eqref{eq:posw2c} and~\eqref{eq:covarw2c}:
+\begin{align}
+  v_{\mu_w} &= R^T\, v_{\mu_c}, \\
+  v_R &+= v_{\mu_c}\, \mu_w^T, \\
+  v_{\Sigma_w} &= R^T\, v_{\Sigma_c}\, R, \\
+  v_R &+= 2\, v_{\Sigma_c}\, R\, \Sigma_w.
+  \label{eq:covar-vjp}
+\end{align}
+
+\paragraph{Quaternion+scale path.}
+When the $(q,s)$ input was used, the kernel chains through the
+\texttt{quat\_scale\_to\_covar\_vjp} helper (\S\ref{sec:qsc-bwd}),
+producing $v_q$ and $v_s$ directly.
+
+\paragraph{Warp-level reduction.}
+Because multiple cameras may share the same Gaussian ($C > 1$), the
+backward kernel uses warp-level labeled partitions
+(\texttt{cg::labeled\_partition}) grouped by Gaussian~id, then a
+single \texttt{atomicAdd} per warp group leader. This is why callers
+must pre-zero all gradient output buffers.
+
+\subsection{Launcher API \texorpdfstring{$\leftrightarrow$}{<->} math correspondence (backward)}
+
+\begin{center}
+\begin{tabular}{l l p{7.5cm}}
+\hline
+\textbf{C++ parameter} & \textbf{Math object} & \textbf{Meaning} \\
+\hline
+\texttt{B}, \texttt{C}, \texttt{N} & --- & Same shape parameters. \\
+\texttt{means}, \texttt{covars}/\texttt{quats}/\texttt{scales} & --- &
+Forward inputs, re-read to recompute intermediate values. \\
+\texttt{viewmats}, \texttt{Ks} & $(R, t), K$ & Camera parameters. \\
+\texttt{radii} & --- & Used to skip culled Gaussians. \\
+\texttt{conics} & $Q$ & Forward output; used for the inverse VJP. \\
+\texttt{compensations} & $\kappa$ & Forward output; needed if
+\texttt{v\_compensations} is non-null. \\
+\texttt{v\_means2d} & $\partial L / \partial \mu_{2d}$ &
+Input gradient, $[B,C,N,2]$. \\
+\texttt{v\_depths} & $\partial L / \partial z$ &
+Input gradient, $[B,C,N]$. \\
+\texttt{v\_conics} & $\partial L / \partial Q$ &
+Input gradient, $[B,C,N,3]$. \\
+\texttt{v\_compensations} & $\partial L / \partial \kappa$ &
+Optional input gradient. \\
+\texttt{v\_means} & $\partial L / \partial \mu_w$ &
+Output gradient, $[B,N,3]$. Pre-zero; kernel accumulates. \\
+\texttt{v\_covars} & $\partial L / \partial \Sigma_w$ &
+Output gradient, $[B,N,6]$. Mutually exclusive with
+\texttt{v\_quats}/\texttt{v\_scales}. \\
+\texttt{v\_quats}, \texttt{v\_scales} & $\partial L / \partial q$,
+$\partial L / \partial s$ &
+Output gradients. Pre-zero; kernel accumulates. \\
+\texttt{v\_viewmats} & $\partial L / \partial (R, t)$ &
+Optional output gradient, $[B,C,4,4]$. Pre-zero; kernel accumulates. \\
+\texttt{stream} & --- & CUDA stream. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Numerical worth-noting}
+
+\begin{itemize}
+  \item The kernel recomputes $R(\hat q)$ and
+  $\Sigma_w = R S^2 R^T$ in the backward pass rather than caching
+  them from the forward. This is the same memory--compute tradeoff
+  noted in \S\ref{sec:qsc-bwd-api}: the recompute is $O(N)$ and
+  dominated by the rasterizer's per-tile work.
+  \item The anti-aliasing blur~\eqref{eq:blur} adds $\epsilon^2 I_2$
+  \emph{before} inversion, ensuring the conic is always
+  well-conditioned. Without this, sub-pixel Gaussians produce
+  singular $2 \times 2$ matrices.
+  \item Gradient accumulation uses \texttt{atomicAdd} after warp-level
+  reduction, so the number of atomic operations per Gaussian per
+  output is $\lceil C / 32 \rceil$ in the worst case.
+\end{itemize}
+
+\subsection{Test correspondence}
+
+The smoke tests in \texttt{ProjectionEWA3DGSFused\_tests.cu} cover:
+\begin{enumerate}
+  \item \emph{On-axis projection}: mean at $(0, 0, 5)$, identity
+  view matrix, $f_x = f_y = 100$, $c_x = c_y = 64$. The projected
+  mean should be $(64, 64)$ at depth $5$ with non-zero radii and
+  finite conics.
+  \item \emph{Behind-camera culling}: mean at $(0, 0, -1)$ is behind
+  the camera; both radii must be zero.
+  \item \emph{Backward smoke}: unit upstream gradients through a
+  visible Gaussian; checks that $\partial L / \partial \mu_w$ is
+  finite and non-zero.
+\end{enumerate}
+The oracle test in \texttt{ProjectionEWA3DGSFused\_oracle\_tests.cu}
+replays a gsplat-Python fixture ($B=1$, $C=1$, $N=8$, pinhole) and
+compares projected means, depths, and conics (masking culled
+Gaussians) with $\text{atol} = 10^{-3}$, $\text{rtol} = 5 \times 10^{-3}$.
+
 \section{Future sections}
 
 This document grows one section per kernel as Phase 0b adds them:
-EWA projection and the tile-rasterizer (forward + backward). Each
+the tile-rasterizer (forward + backward). Each
 follows the same template: source-file pointers, the forward map in
 coordinate-free form, the VJP derivation when applicable, the
 launcher API correspondence, and the test correspondence.
