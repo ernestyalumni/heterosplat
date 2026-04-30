@@ -19,6 +19,7 @@ ADD_EXECUTABLE(Check
   Training/Activations_tests.cu
   Training/AdamOptimizer_tests.cu
   Training/ImageLoss_tests.cu
+  Training/TrainSmokeTest.cu
   )
 
 # Tests that load oracle fixtures need an absolute path to Fixtures/ baked

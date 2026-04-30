@@ -250,12 +250,13 @@ void initialize_from_colmap(
     h_logit_opacities[n] = initial_logit_opacity;
   }
 
-  // Scale initialization: average spacing from bounding box
+  // Scale initialization: average spacing from bounding box.
+  // Use max extent / cbrt(N) to handle degenerate (coplanar) point clouds.
   const float extent_x {max_x - min_x};
   const float extent_y {max_y - min_y};
   const float extent_z {max_z - min_z};
-  const float volume {extent_x * extent_y * extent_z};
-  const float avg_spacing {std::cbrt(volume / static_cast<float>(N))};
+  const float max_extent {std::max({extent_x, extent_y, extent_z, 1e-6f})};
+  const float avg_spacing {max_extent / std::cbrt(static_cast<float>(N))};
   const float initial_log_scale {std::log(std::max(avg_spacing * 0.5f, 1e-6f))};
 
   std::cout << "  Scene extents: [" << extent_x << ", " << extent_y << ", "
@@ -324,6 +325,7 @@ struct TrainBuffers
   GpuBuffer<float> grad_rendered;
 
   // Backward buffers
+  GpuBuffer<float> v_render_alphas;
   GpuBuffer<float> v_means2d;
   GpuBuffer<float> v_conics;
   GpuBuffer<float> v_colors;
@@ -369,6 +371,7 @@ struct TrainBuffers
     loss = GpuBuffer<float>(1);
     grad_rendered = GpuBuffer<float>(n_pixels * 3);
 
+    v_render_alphas = GpuBuffer<float>(n_pixels);
     v_means2d = GpuBuffer<float>(N * 2);
     v_conics = GpuBuffer<float>(N * 3);
     v_colors = GpuBuffer<float>(N * 3);
@@ -534,6 +537,7 @@ float train_step(
     cudaMemcpyDeviceToHost, stream);
 
   // ---- Backward: Rasterize ----
+  bufs.v_render_alphas.zero();
   bufs.v_means2d.zero();
   bufs.v_conics.zero();
   bufs.v_colors.zero();
@@ -547,7 +551,7 @@ float train_step(
     image_w, image_h, tile_size,
     bufs.tile_offsets.ptr, bufs.flatten_ids_sorted.ptr,
     bufs.render_alphas.ptr, bufs.last_ids.ptr,
-    bufs.grad_rendered.ptr, nullptr,
+    bufs.grad_rendered.ptr, bufs.v_render_alphas.ptr,
     nullptr, bufs.v_means2d.ptr, bufs.v_conics.ptr,
     bufs.v_colors.ptr, bufs.v_opacities.ptr,
     stream);
