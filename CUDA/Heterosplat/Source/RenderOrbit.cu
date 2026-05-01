@@ -459,11 +459,21 @@ int main(int argc, char** argv)
   constexpr std::uint32_t tile_size {16};
   std::cout << "\nRendering " << num_frames << " frames...\n";
 
+  // Cinematic camera: azimuth pans once around (0 -> 360°) while elevation
+  // sinusoidally bobs ±15° around the base elevation, completing two full
+  // bob cycles per orbit. The bob frequency is an integer multiple of the
+  // azimuth cycle so the loop closes cleanly.
+  constexpr float bob_amplitude_deg {15.0f};
+  constexpr int bob_cycles {2};
   for (std::uint32_t f = 0; f < num_frames; ++f)
   {
-    const float azimuth {360.0f * f / num_frames};
+    const float t {static_cast<float>(f) / static_cast<float>(num_frames)};
+    const float azimuth {360.0f * t};
+    const float elevation_t {
+      elevation_deg
+      + bob_amplitude_deg * std::sin(2.0f * pi * bob_cycles * t)};
     const auto viewmat {orbit_viewmat(
-      cx, cy, cz, orbit_radius, elevation_deg, azimuth)};
+      cx, cy, cz, orbit_radius, elevation_t, azimuth)};
 
     std::vector<float> pixels;
     render_frame(
@@ -486,7 +496,7 @@ int main(int argc, char** argv)
   // Stitch with ffmpeg
   const std::string mp4_path {output_dir + "/orbit.mp4"};
   const std::string ffmpeg_cmd {
-    "ffmpeg -y -framerate 30 -i " + output_dir + "/frame_%04d.png"
+    "ffmpeg -y -framerate 60 -i " + output_dir + "/frame_%04d.png"
     + " -c:v libx264 -pix_fmt yuv420p -crf 18 " + mp4_path
     + " 2>/dev/null"};
 
