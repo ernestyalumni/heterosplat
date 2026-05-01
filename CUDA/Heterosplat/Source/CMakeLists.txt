@@ -101,6 +101,7 @@ ADD_SUBDIRECTORY(Colmap)
 ADD_SUBDIRECTORY(Core)
 ADD_SUBDIRECTORY(IO)
 ADD_SUBDIRECTORY(Kernels)
+ADD_SUBDIRECTORY(Normalize)
 ADD_SUBDIRECTORY(Training)
 ADD_SUBDIRECTORY(UnitTests)
 
@@ -166,6 +167,28 @@ TARGET_LINK_LIBRARIES(RenderOrbit
   )
 
 SET_TARGET_PROPERTIES(RenderOrbit
+  PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")
+
+################################################################################
+## NormalizeAndFuse — Phase 2 binary.
+## Ingests one or two .ply files with potentially different coordinate
+## conventions, normalizes into a shared Z-up unit-sphere frame, and optionally
+## concatenates (fuses) them into a single output.
+################################################################################
+
+ADD_EXECUTABLE(NormalizeAndFuse
+  NormalizeAndFuse.cu
+  )
+
+TARGET_LINK_LIBRARIES(NormalizeAndFuse
+  PRIVATE
+  IO
+  Normalize
+  )
+
+SET_TARGET_PROPERTIES(NormalizeAndFuse
   PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")

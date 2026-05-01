@@ -16,6 +16,8 @@ ADD_EXECUTABLE(Check
   Kernels/Heterosplat/SphericalHarmonics_tests.cu
   Kernels/Heterosplat/SphericalHarmonics_oracle_tests.cu
   IO/PlyRoundTrip_tests.cu
+  Normalize/Convention_tests.cu
+  Normalize/Transform_tests.cu
   Training/Activations_tests.cu
   Training/AdamOptimizer_tests.cu
   Training/ImageLoss_tests.cu
@@ -40,6 +42,7 @@ TARGET_LINK_LIBRARIES(Check
   Core
   HeterosplatKernels
   IO
+  Normalize
   Training
   gtest_main
   gmock_main

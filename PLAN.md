@@ -6,7 +6,7 @@ Single-author project (Ernest Yeung) shipped publicly in phases. **Built in pure
 
 Primary purpose: portfolio evidence in the active World Labs interview cycle. Secondary purpose: a real, useful 3D-data tool.
 
-Last updated: 2026-04-29.
+Last updated: 2026-04-30.
 
 ---
 
@@ -208,8 +208,8 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | 0a — Vendor + standalone build | ✅ Done 2026-04-28 | CMake build, `Tensor` type, first vendored kernel + smoke test |
 | 0b — Torch-free launchers | ✅ Done 2026-04-29 | All 6 kernels + CUB glue + ForwardBackwardSmokeTest (1k Gaussians, fwd+bwd) |
 | 1 — Single-source train + render | 🔧 In progress | — |
-| 2 — Heterogeneous + normalization + 1st custom kernel | Not started | — |
-| 3 — Viewer + 2nd custom kernel | Not started | — |
+| 2 — Heterogeneous + normalization + 1st custom kernel | ✅ Done 2026-04-30 | NormalizeAndFuse binary, LaTeX |
+| 3 — Viewer + 2nd custom kernel | 🔧 In progress | — |
 
 ### Phase 0b sub-status (2026-04-29)
 
@@ -223,6 +223,22 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | `rasterize_to_pixels_3dgs`  | ✅ | ✅ fwd + bwd | ✅ | ✅ |
 
 Total tests: 61 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). LaTeX math reference (`Documents/LaTeX/KernelMathematics.tex`) covers all 6 kernels.
+
+### Phase 2 sub-status (2026-04-30)
+
+| Component | Status | Notes |
+|---|---|---|
+| Similarity transform kernel | ✅ Done | `apply_similarity_transform_kernel` — rotation + scale + translation on means/quats/log_scales |
+| Homogeneous transform kernel | ✅ Done | `apply_homogeneous_transform_means_kernel` — 4x4 matrix on means with perspective division |
+| Convention detection | ✅ Done | Up-axis auto-detection from point cloud statistics (variance heuristic) |
+| Scene extent + normalization | ✅ Done | AABB extent, centroid, unit-sphere normalization |
+| Y-up to Z-up rotation | ✅ Done | -90° around X axis |
+| NormalizeAndFuse binary | ✅ Done | `--source-a A.ply [--source-b B.ply] --convention-a auto --output fused.ply` |
+| PLY reader | ✅ Done (Phase 1) | Reads standard 3DGS format, auto-detects SH degree |
+| Unit tests | ✅ Done | 13 new tests (7 Convention + 6 Transform), 78 total passing |
+| LaTeX documentation | ✅ Done | `Documents/LaTeX/NormalizationMathematics.tex` (3 pages) |
+
+Total tests: 78 (`./build/Check`), all passing.
 
 `ForwardBackwardSmokeTest` binary chains all 6 kernels + CUB prefix sum + CUB radix sort into a single fwd+bwd pass on 1024 synthetic Gaussians (64x64 render, 16px tiles). Verifies finite non-zero gradients propagate through the full pipeline. CUB wrappers live in `Core/CubOperations.{h,cu}`.
 

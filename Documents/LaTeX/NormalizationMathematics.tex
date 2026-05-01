@@ -1,0 +1,198 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage[final]{microtype}
+
+\title{heterosplat: Normalization Mathematics}
+\author{Source: \texttt{repos/heterosplat/Documents/LaTeX/NormalizationMathematics.tex}}
+\date{\today}
+
+\newcommand{\SO}{\mathrm{SO}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\HQ}{\mathbb{H}}
+\newcommand{\diag}{\operatorname{diag}}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This document describes the mathematics behind the \textbf{Normalize} module
+(Phase~2 of heterosplat). The module transforms 3D Gaussian splat parameters
+from arbitrary coordinate conventions into a shared canonical frame, enabling
+fusion of multiple splat captures.
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item \texttt{Source/Normalize/Transform.h} / \texttt{Transform.cu} ---
+        CUDA kernels for similarity and homogeneous transforms.
+  \item \texttt{Source/Normalize/Convention.h} / \texttt{Convention.cpp} ---
+        up-axis detection, scene extent, normalization transform computation.
+  \item \texttt{Source/NormalizeAndFuse.cu} --- binary that loads, normalizes,
+        and optionally fuses two \texttt{.ply} files.
+\end{itemize}
+
+\section{Similarity transforms on Gaussians}
+\label{sec:similarity}
+
+A \emph{similarity transform} is parameterized as
+\begin{equation}
+  \mathbf{p}' = s \, R \, \mathbf{p} + \mathbf{t},
+  \qquad R \in \SO(3),\quad s > 0,\quad \mathbf{t} \in \R^3.
+  \label{eq:similarity}
+\end{equation}
+Each 3D Gaussian splat is defined by parameters
+$(\boldsymbol{\mu},\, q,\, \boldsymbol{\sigma},\, \alpha,\, \mathbf{c})$:
+mean position, orientation quaternion, log-scale vector, opacity, and
+spherical harmonics coefficients. Under~\eqref{eq:similarity} each transforms
+as follows.
+
+\subsection{Means}
+Direct application:
+\begin{equation}
+  \boldsymbol{\mu}' = s \, R \, \boldsymbol{\mu} + \mathbf{t}.
+\end{equation}
+
+\subsection{Quaternions (orientation)}
+\label{sec:quat-compose}
+
+Each Gaussian's 3D covariance is $\Sigma = R(q)\,S^2\,R(q)^T$ where
+$R(q)$ is the rotation decoded from the Gaussian's quaternion~$q$ and
+$S = \diag(e^{\sigma_1}, e^{\sigma_2}, e^{\sigma_3})$. The similarity
+rotation acts by left-composing:
+\begin{equation}
+  \Sigma' = R\,R(q)\,S'^2\,R(q)^T\,R^T
+  \quad\Longrightarrow\quad
+  q' = q_R \otimes q,
+\end{equation}
+where $q_R \in \HQ_1$ is the unit quaternion corresponding to~$R$ and
+$\otimes$ denotes Hamilton product.
+
+\paragraph{Quaternion multiplication.}
+Given $a = (a_w, a_x, a_y, a_z)$ and $b = (b_w, b_x, b_y, b_z)$, the
+Hamilton product $c = a \otimes b$ is:
+\begin{align}
+  c_w &= a_w b_w - a_x b_x - a_y b_y - a_z b_z, \\
+  c_x &= a_w b_x + a_x b_w + a_y b_z - a_z b_y, \\
+  c_y &= a_w b_y - a_x b_z + a_y b_w + a_z b_x, \\
+  c_z &= a_w b_z + a_x b_y - a_y b_x + a_z b_w.
+\end{align}
+
+\paragraph{Matrix-to-quaternion conversion (Shepperd's method).}
+Given rotation matrix $R$ with entries $r_{ij}$, let
+$\mathrm{tr} = r_{00} + r_{11} + r_{22}$. If $\mathrm{tr} > 0$:
+\begin{equation}
+  s = \frac{1}{2\sqrt{\mathrm{tr}+1}}, \quad
+  q = \Bigl(\tfrac{1}{4s},\;
+  (r_{21}-r_{12})s,\;
+  (r_{02}-r_{20})s,\;
+  (r_{10}-r_{01})s\Bigr).
+\end{equation}
+Otherwise, choose the diagonal element $r_{ii}$ with the largest value and
+apply the corresponding formula (three cases for $i = 0, 1, 2$).
+
+\subsection{Log-scales}
+
+The uniform scale factor~$s$ multiplies each axis of the Gaussian equally:
+\begin{equation}
+  \boldsymbol{\sigma}' = \boldsymbol{\sigma} + \ln(s) \cdot \mathbf{1}_3.
+\end{equation}
+In code: \texttt{log\_scales[n*3+k] += logf(scale)} for $k = 0,1,2$.
+
+\subsection{Opacity and SH coefficients}
+
+Opacity is invariant under similarity transforms. The DC component of
+spherical harmonics is also invariant (it represents view-independent radiance).
+
+Higher-order SH coefficients ($\ell \geq 1$) should be rotated using Wigner
+$D$-matrices of the rotation~$R$. For degree~$\ell$, the rotation acts on
+the $(2\ell+1)$-dimensional subspace via
+\begin{equation}
+  c_\ell^{'m} = \sum_{m'=-\ell}^{\ell} D^{\ell}_{mm'}(R)\, c_\ell^{m'},
+\end{equation}
+where $D^\ell(R)$ is the real Wigner $D$-matrix. This is deferred in the
+current implementation; the kernel only transforms means, quaternions, and
+log-scales.
+
+\section{Homogeneous transform (means only)}
+\label{sec:homogeneous}
+
+For non-rigid or non-uniform transforms where rotation extraction is ambiguous,
+we apply a full $4 \times 4$ homogeneous matrix to means only:
+\begin{equation}
+  \begin{pmatrix} x' \\ y' \\ z' \\ w \end{pmatrix}
+  = M \begin{pmatrix} x \\ y \\ z \\ 1 \end{pmatrix},
+  \qquad
+  \mathbf{p}' = \frac{1}{w}\begin{pmatrix} x' \\ y' \\ z' \end{pmatrix}.
+\end{equation}
+For affine transforms the last row is $(0,0,0,1)$ and $w = 1$. The
+perspective division handles the general projective case.
+
+\section{Coordinate convention normalization}
+\label{sec:convention}
+
+Different 3D capture tools use different conventions:
+\begin{center}
+\begin{tabular}{ll}
+  \textbf{Tool} & \textbf{Convention} \\
+  \hline
+  COLMAP, engineering & Z-up \\
+  Blender, OpenGL, Unity & Y-up \\
+\end{tabular}
+\end{center}
+
+\subsection{Y-up to Z-up rotation}
+
+The canonical target frame is Z-up. To convert from Y-up, rotate $-90°$
+around the $X$-axis:
+\begin{equation}
+  R_{Y\to Z} =
+  \begin{pmatrix}
+    1 & 0 & 0 \\
+    0 & 0 & -1 \\
+    0 & 1 & 0
+  \end{pmatrix}.
+\end{equation}
+This maps $(x, y, z)_{\text{Y-up}} \mapsto (x, -z, y)_{\text{Z-up}}$.
+
+\subsection{Automatic detection}
+
+The up-axis is detected heuristically from the point cloud statistics:
+\begin{enumerate}
+  \item Compute per-axis variance $\sigma^2_x, \sigma^2_y, \sigma^2_z$.
+  \item The up-axis typically has the smallest variance (scenes are wider
+        than tall).
+  \item If the minimum-variance axis is clearly smaller ($< 50\%$ of the
+        second-smallest), use it.
+  \item Otherwise, fall back to checking which axis has a positive mean
+        (objects are above the ground plane).
+\end{enumerate}
+
+\subsection{Unit-sphere normalization}
+
+After up-axis alignment, the scene is centered and scaled to fit in a
+unit sphere:
+\begin{align}
+  s &= \frac{2}{\max(\Delta x, \Delta y, \Delta z)}, \\
+  \mathbf{t} &= -s \, R \, \bar{\mathbf{p}},
+\end{align}
+where $\bar{\mathbf{p}}$ is the centroid and $\Delta$ denotes extent
+(max $-$ min) along each axis. This normalization ensures that two captures
+at different physical scales and positions are brought into register.
+
+\section{Fusion}
+
+After both sources are normalized to the same frame (Z-up, unit sphere),
+fusion is concatenation: the $N_A + N_B$ Gaussians are simply stacked.
+Downstream rendering treats them as a single scene.
+
+When the two sources have different SH degrees, the fused output uses the
+minimum degree, truncating higher-order coefficients from the richer source.
+
+\end{document}
