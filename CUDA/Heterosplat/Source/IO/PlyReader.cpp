@@ -19,11 +19,13 @@ GaussianData read_gaussians_ply(const std::string& path)
     throw std::runtime_error{"cannot open PLY for reading: " + path};
   }
 
-  // Parse header
+  // Parse header. Record property names in declaration order so we can
+  // dispatch each binary float to its correct slot regardless of layout
+  // variant (Inria 3DGS = with normals + strided f_rest;
+  // gsplat export_splats = no normals + interleaved f_rest).
+  std::vector<std::string> prop_names;
   std::string line;
   std::uint32_t num_vertices {0};
-  std::uint32_t num_float_properties {0};
-  std::uint32_t num_rest {0};
   bool in_vertex_element {false};
 
   while (std::getline(file, line))
@@ -54,11 +56,7 @@ GaussianData read_gaussians_ply(const std::string& path)
       iss >> dtype >> name;
       if (dtype == "float" || dtype == "float32")
       {
-        ++num_float_properties;
-        if (name.substr(0, 7) == "f_rest_")
-        {
-          ++num_rest;
-        }
+        prop_names.push_back(name);
       }
     }
   }
@@ -68,10 +66,19 @@ GaussianData read_gaussians_ply(const std::string& path)
     throw std::runtime_error{"PLY has 0 vertices"};
   }
 
-  // Determine SH degree from rest count.
-  // num_rest = (K - 1) * 3 where K = (degree+1)^2
-  // K = num_rest / 3 + 1
-  // degree = sqrt(K) - 1
+  std::uint32_t num_rest {0};
+  bool has_normals {false};
+  for (const auto& name : prop_names)
+  {
+    if (name == "nx") has_normals = true;
+    if (name.rfind("f_rest_", 0) == 0) ++num_rest;
+  }
+
+  // Layout heuristic: Inria 3DGS writes normals + strided f_rest
+  // (channel-major: all R coeffs, then G, then B). gsplat export_splats
+  // omits normals and writes interleaved f_rest (per-coefficient RGB).
+  const bool strided_sh_rest {has_normals};
+
   std::uint32_t sh_degree {0};
   if (num_rest > 0)
   {
@@ -81,14 +88,17 @@ GaussianData read_gaussians_ply(const std::string& path)
   }
 
   const std::uint32_t K {(sh_degree + 1) * (sh_degree + 1)};
+  const std::uint32_t num_float_properties {
+    static_cast<std::uint32_t>(prop_names.size())};
+  const std::uint32_t expected_props {
+    3 + (has_normals ? 3u : 0u) + 3 + num_rest + 1 + 3 + 4};
 
-  // Expected: 3(pos) + 3(normal) + 3(DC) + num_rest + 1(opacity) + 3(scale) + 4(quat)
-  const std::uint32_t expected_props {3 + 3 + 3 + num_rest + 1 + 3 + 4};
   if (num_float_properties != expected_props)
   {
     throw std::runtime_error{
       "unexpected property count: " + std::to_string(num_float_properties)
-      + " (expected " + std::to_string(expected_props) + ")"};
+      + " (expected " + std::to_string(expected_props)
+      + ", has_normals=" + (has_normals ? "true" : "false") + ")"};
   }
 
   GaussianData data;
@@ -114,38 +124,47 @@ GaussianData read_gaussians_ply(const std::string& path)
 
     std::uint32_t offset {0};
 
-    // Position
     data.means[n * 3 + 0] = record[offset++];
     data.means[n * 3 + 1] = record[offset++];
     data.means[n * 3 + 2] = record[offset++];
 
-    // Normal (skip)
-    offset += 3;
+    if (has_normals) offset += 3;
 
-    // SH DC
     float* gauss_sh {&data.sh_coeffs[n * K * 3]};
     gauss_sh[0] = record[offset++];
     gauss_sh[1] = record[offset++];
     gauss_sh[2] = record[offset++];
 
-    // SH rest: interleaved as [coeff1_R, coeff1_G, coeff1_B, coeff2_R, ...]
-    for (std::uint32_t j = 1; j < K; ++j)
+    if (strided_sh_rest)
     {
+      // Inria layout: f_rest_N where N = c*(K-1) + (j-1).
+      // Channel-major outer loop, coefficient-minor inner loop.
       for (std::uint32_t c = 0; c < 3; ++c)
       {
-        gauss_sh[j * 3 + c] = record[offset++];
+        for (std::uint32_t j = 1; j < K; ++j)
+        {
+          gauss_sh[j * 3 + c] = record[offset++];
+        }
+      }
+    }
+    else
+    {
+      // gsplat layout: per-coefficient RGB triple.
+      for (std::uint32_t j = 1; j < K; ++j)
+      {
+        for (std::uint32_t c = 0; c < 3; ++c)
+        {
+          gauss_sh[j * 3 + c] = record[offset++];
+        }
       }
     }
 
-    // Opacity
     data.opacities[n] = record[offset++];
 
-    // Scale
     data.scales[n * 3 + 0] = record[offset++];
     data.scales[n * 3 + 1] = record[offset++];
     data.scales[n * 3 + 2] = record[offset++];
 
-    // Quaternion (w, x, y, z)
     data.quats[n * 4 + 0] = record[offset++];
     data.quats[n * 4 + 1] = record[offset++];
     data.quats[n * 4 + 2] = record[offset++];

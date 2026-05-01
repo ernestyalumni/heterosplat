@@ -49,6 +49,10 @@ void write_gaussians_ply(
   file << "property float f_dc_1\n";
   file << "property float f_dc_2\n";
 
+  // f_rest properties declared in Inria 3DGS strided order:
+  // f_rest_N where N = c * (K-1) + (j-1). Channel-major outer (R, G, B),
+  // coefficient-minor inner (j = 1..K-1). This matches the universally-read
+  // 3DGS PLY layout from the original "3D Gaussian Splatting" code release.
   for (std::uint32_t i = 0; i < num_rest; ++i)
   {
     file << "property float f_rest_" << i << "\n";
@@ -87,12 +91,10 @@ void write_gaussians_ply(
       reinterpret_cast<const char*>(&gauss_sh[0]),
       num_dc * sizeof(float));
 
-    // SH rest: f_rest stores all remaining coefficients interleaved
-    // Standard 3DGS PLY layout: for each rest coeff index j=1..K-1,
-    // writes channel 0, channel 1, channel 2
-    for (std::uint32_t j = 1; j < sh_coeffs_per_channel; ++j)
+    // SH rest in strided (channel-major) order to match Inria's PLY layout.
+    for (std::uint32_t c = 0; c < 3; ++c)
     {
-      for (std::uint32_t c = 0; c < 3; ++c)
+      for (std::uint32_t j = 1; j < sh_coeffs_per_channel; ++j)
       {
         file.write(
           reinterpret_cast<const char*>(&gauss_sh[j * 3 + c]),
