@@ -22,10 +22,10 @@ These were debated, decided, and written down. If a future you wants to revisit,
 - **Pure C++17 + CUDA C++.** No Python, no PyTorch, no Rust. Reasoning lives in `PLAN.md` → "Why C++ + CUDA, no Python."
 - **Vendor gsplat's `csrc/` kernels** (Apache-2.0); replace the torch-thin launchers with raw-pointer launchers we own. `gsplat`'s `__global__` kernels are torch-free; only the launchers + ATen layer touch `at::Tensor`.
 - **Single CMake project, single static binary** `heterosplat` with subcommands (`train`, `render`, `view`, `normalize`).
-- **Single-header dependencies** vendored in `thirdparty/`: GLM, stb, CLI11, nlohmann/json, fmt; GLFW + Dear ImGui + glad for the Phase 3 viewer. Tests use **GoogleTest via FetchContent** (matches `InServiceOfX/CUDALibraries/MoreCUDA`), single `Check` executable.
+- **Single-header dependencies** vendored in `thirdparty/`: GLM, stb, CLI11, nlohmann/json, fmt; GLFW + GLEW + Dear ImGui for the Phase 3 viewer. Tests use **GoogleTest via FetchContent** (matches `InServiceOfX/CUDALibraries/MoreCUDA`), single `Check` executable.
 - **Linux-only** until Phase 4+.
 - **License: Apache 2.0** (matches vendored gsplat). The current `LICENSE` is MIT — switch before first public ship.
-- **"Heterogeneous" = exactly two source formats** across the whole project. COLMAP in Phase 1 + one of {mesh, depth-maps, second-coord-convention capture} in Phase 2. Anything more is Phase 4+.
+- **"Heterogeneous" = exactly two source formats** across the whole project. COLMAP in Phase 1 + second-coord-convention capture in Phase 2. Anything more is Phase 4+.
 
 ## Where the work happens
 
@@ -37,7 +37,10 @@ These were debated, decided, and written down. If a future you wants to revisit,
 ```
 heterosplat/
 ├── PLAN.md, AGENTS.md, README.md          # docs (this file)
-├── Documents/LaTeX/KernelMathematics.tex  # math reference, one section per kernel
+├── Documents/LaTeX/
+│   ├── KernelMathematics.tex              # math reference, one section per kernel
+│   ├── NormalizationMathematics.tex       # Phase 2: similarity transforms, quaternion composition
+│   └── ViewerArchitecture.tex             # Phase 3: viewer pipeline, camera model, colormap kernel
 ├── Scripts/
 │   ├── run_container.sh                   # docker dev shell / one-shot
 │   ├── run_tests.sh                       # host test runner (forwards args to ./Check)
@@ -51,10 +54,13 @@ heterosplat/
         ├── ForwardBackwardSmokeTest.cu    # Phase 0b: fwd+bwd through all 6 kernels
         ├── TrainSingleScene.cu            # Phase 1: full training loop binary
         ├── RenderOrbit.cu                 # Phase 1: orbit render → PNG frames + mp4
+        ├── NormalizeAndFuse.cu            # Phase 2: normalize + fuse two .ply files
         ├── Colmap/{CMakeLists.txt, ColmapReader.{h,cpp}}
         ├── Core/{CMakeLists.txt, Tensor.h, CubOperations.{h,cu}}
         ├── IO/{CMakeLists.txt, ImageIO.{h,cpp}, PlyWriter.{h,cpp}, PlyReader.{h,cpp}}
         ├── Training/{CMakeLists.txt, AdamOptimizer.{h,cu}, ImageLoss.{h,cu}, Activations.{h,cu}}
+        ├── Normalize/{CMakeLists.txt, Transform.{h,cu}, Convention.{h,cpp}}
+        ├── Viewer/{CMakeLists.txt, SplatViewer.cu, ColormapDebug.{h,cu}}
         ├── Kernels/
         │   ├── Thirdparty/Gsplat/         # vendored Apache-2.0 (LICENSE, NOTICE, VENDORED.md)
         │   │   ├── Common.h               # patched: torch macros stripped
@@ -78,7 +84,9 @@ heterosplat/
             ├── Fixtures/                  # captured gsplat-Python outputs
             ├── Colmap/ColmapReader_tests.cu
             ├── IO/PlyRoundTrip_tests.cu
-            ├── Training/{Activations,AdamOptimizer,ImageLoss}_tests.cu
+            ├── Training/{Activations,AdamOptimizer,ImageLoss,TrainSmokeTest}_tests.cu
+            ├── Normalize/{Convention,Transform}_tests.cu
+            ├── Viewer/ColormapDebug_tests.cu
             └── Kernels/Heterosplat/
                 ├── *_tests.cu             # closed-form + gradcheck
                 └── *_oracle_tests.cu      # vs gsplat-Python
@@ -119,7 +127,7 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 
 ### Current test count
 
-63 tests (`./build/Check`), all passing. Plus `ForwardBackwardSmokeTest` binary (separate from gtest). Suite layout:
+84 tests (`./build/Check`), all passing. Plus `ForwardBackwardSmokeTest` binary (separate from gtest). Suite layout:
 
 **Core & IO:**
 - `Tensor.*` (10) — Core/Tensor.h
@@ -138,6 +146,38 @@ Container mounts the repo at `/heterosplat`. Build dir created in the container 
 - `Activations.*` (6) — sigmoid/exp fwd+bwd, quat normalize, view dirs
 - `AdamOptimizer.*` (3) — single step, multi-step momentum, zero grad
 - `ImageLoss.*` (5) — L1 forward/backward, identity, null grad
+- `TrainSmokeTest.*` (2) — synthetic COLMAP data loading
+
+**Normalize (Phase 2):**
+- `Convention.*` (7) — up-axis detection, scene extent, rotation, normalization, parsing
+- `Transform.*` (6) — identity, translation, scale, rotation, homogeneous identity/translation
+
+**Viewer (Phase 3):**
+- `ColormapDebug.*` (6) — min/max/mid color, axis selection, higher-order zeroing, multiple gaussians
+
+## Custom CUDA kernels
+
+heterosplat includes two custom CUDA kernels (beyond the vendored gsplat kernels):
+
+1. **`apply_similarity_transform_kernel`** (Phase 2, `Normalize/Transform.cu`)
+   - Batched similarity transform on Gaussian parameters: means, quaternions, log-scales
+   - Includes Shepperd's method for matrix-to-quaternion conversion + Hamilton product
+   - Used by NormalizeAndFuse binary and SplatViewer's live transform widget
+
+2. **`colormap_per_axis_kernel`** (Phase 3, `Viewer/ColormapDebug.cu`)
+   - Maps Gaussian positions along a selected coordinate axis to a turbo-like colormap
+   - Overwrites SH DC coefficients + zeros higher-order terms for view-independent debug visualization
+   - Used by SplatViewer's debug panel for coordinate convention verification
+
+## Binaries
+
+| Binary | Phase | Purpose | Usage |
+|---|---|---|---|
+| `ForwardBackwardSmokeTest` | 0b | fwd+bwd through all 6 kernels | `./ForwardBackwardSmokeTest` |
+| `TrainSingleScene` | 1 | Full training loop | `./TrainSingleScene <sparse_dir> <images_dir> [out.ply] [iters]` |
+| `RenderOrbit` | 1 | Orbit render to PNG/mp4 | `./RenderOrbit <input.ply> [out_dir] [frames] [w] [h]` |
+| `NormalizeAndFuse` | 2 | Normalize + fuse .ply | `./NormalizeAndFuse --source-a A.ply [--source-b B.ply] [--convention-a auto]` |
+| `SplatViewer` | 3 | Interactive GLFW viewer | `./SplatViewer <input.ply> [width] [height]` |
 
 ## Adding the next kernel (the slice pattern)
 
@@ -145,11 +185,11 @@ Each new kernel from PLAN.md's Phase 0b table follows this pattern. The two done
 
 1. **Read upstream.** Open `repos/gsplat/gsplat/cuda/csrc/<Kernel>CUDA.cu`. Identify the `__global__` template (or templates) and the `launch_*` host wrapper.
 2. **Vendor.** Create `CUDA/Heterosplat/Source/Kernels/Thirdparty/Gsplat/<Kernel>Kernels.cuh` with **only** the `__global__` templates and any `__device__` helpers they need, copied verbatim. Drop the `launch_*` and `AT_DISPATCH_*` blocks. If the kernel uses ATen-coupled helpers (e.g. `gpuAtomicAdd`), substitute the CUDA built-in (`atomicAdd`) and record the substitution in `NOTICE` and `VENDORED.md`.
-3. **Launcher.** Create `CUDA/Heterosplat/Source/Kernels/Heterosplat/<Kernel>.{h,cu}` with `void launch_<canonical_op_name>_forward(...)` and `_backward(...)`. Keep gsplat's canonical operation name (e.g. `quat_scale_to_covar_preci`) for grep-ability; spell out `_forward` / `_backward` (per the project naming convention — see `MEMORY` if you have it). Doxygen the public API: param shapes, layouts, nullptr-skip semantics, write-vs-accumulate, math identity.
+3. **Launcher.** Create `CUDA/Heterosplat/Source/Kernels/Heterosplat/<Kernel>.{h,cu}` with `void launch_<canonical_op_name>_forward(...)` and `_backward(...)`. Keep gsplat's canonical operation name (e.g. `quat_scale_to_covar_preci`) for grep-ability; spell out `_forward` / `_backward` (per the project naming convention). Doxygen the public API: param shapes, layouts, nullptr-skip semantics, write-vs-accumulate, math identity.
 4. **Wire CMake.** Append the new `.cu` to `Source/Kernels/Heterosplat/CMakeLists.txt`'s `ADD_LIBRARY(HeterosplatKernels …)`.
 5. **Closed-form / gradcheck tests.** Create `Source/UnitTests/Kernels/Heterosplat/<Kernel>_tests.cu`. At least one closed-form sanity test and one numerical gradcheck (centered finite-difference vs analytic backward). Pattern: see `QuatScaleToCovar_tests.cu` and `SphericalHarmonics_tests.cu`.
 6. **Capture oracle fixture.** Add a `capture_<kernel>(out_dir, ...)` function to `Scripts/CaptureGsplatOracle.py` mirroring the existing two; run via `./Scripts/run_container.sh 'python3 /heterosplat/Scripts/CaptureGsplatOracle.py /heterosplat/CUDA/Heterosplat/Source/UnitTests/Fixtures'`.
-7. **Oracle test.** Create `Source/UnitTests/Kernels/Heterosplat/<Kernel>_oracle_tests.cu` using `OracleFixture.h` to load fixtures and `expect_close` (`atol=1e-4, rtol=1e-4` covers nvcc-version drift). Pattern: see existing two oracle test files.
+7. **Oracle test.** Create `Source/UnitTests/Kernels/Heterosplat/<Kernel>_oracle_tests.cu` using `OracleFixture.h` to load fixtures and `expect_close` (`atol=1e-4, rtol=1e-4` covers nvcc-version drift). Pattern: see existing oracle test files.
 8. **Wire UnitTests CMake.** Append the new test files to `Source/UnitTests/CMakeLists.txt`'s `ADD_EXECUTABLE(Check …)`.
 9. **LaTeX section.** Append a section to `Documents/LaTeX/KernelMathematics.tex`: source-file pointers → forward map → storage layout → launcher API correspondence (forward) → backward (VJP derivation) → launcher API correspondence (backward) → test correspondence. Match the structure of the existing two sections. Build with `latexmk -pdf KernelMathematics.tex`.
 10. **Update PLAN.md status table** (Phase 0b sub-status) to flip the kernel's row.
@@ -158,20 +198,21 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 ## Where to start (next concrete action)
 
-**Phase 0b is fully complete** — all 6 kernels vendored, launched, tested, and chained into `ForwardBackwardSmokeTest` (1024 Gaussians, 64x64 render, fwd+bwd with finite gradient checks). CUB prefix sum + radix sort wrappers in `Core/CubOperations.{h,cu}`.
+**Phases 0-3 are complete.** The core infrastructure — vendored kernels, training, normalization, fusion, and interactive viewer — is built and tested.
 
-**Phase 1 training pipeline is built.** Core components:
-- `TrainSingleScene` binary: `./TrainSingleScene <colmap_sparse> <images_dir> [output.ply] [iters]`
-- `RenderOrbit` binary: `./RenderOrbit <input.ply> [output_dir] [frames] [width] [height]`
-- COLMAP reader, image IO (stb), PLY reader/writer, Adam optimizer, L1 loss, activation kernels (sigmoid/exp fwd+bwd, quat normalize, view directions)
-
-**Next steps:** test on real COLMAP data, add CLI11 frontend, add SSIM loss.
+**Next steps for Phase 4+ (gated on World Labs cycle):**
+- Test TrainSingleScene on real COLMAP data
+- Add CLI11 unified frontend (single `heterosplat` binary with subcommands)
+- Add SSIM loss alongside L1
+- Record demo video for public ship
+- Add densification (split/clone/prune)
+- CUDA-GL interop (replace memcpy with mapped buffer for viewer perf)
 
 ## Conventions
 
 - **Git:** never commit/push to `master`/`main` — Ernest merges manually. Feature branches OK; `feat/` prefix.
 - **C++ identifier style:** snake_case for class data members (with trailing `_` on private) and member/free functions; CamelCase for class/struct/file/directory names. Spell out names — no `numel`, `nbytes`, `cnt`, `idx`, `tmp`. Loop counters `i, j, k` in tight numerics are fine. **Exception:** if a math identifier has a single canonical long form (e.g. gsplat's `quat_scale_to_covar_preci`), keep that — vendoring conventions trump local rule, since the upstream-grep value is real.
-- **Docs:** `PLAN.md` is the live plan. Update its "Status" table as phases complete. Don't write new planning files alongside it; amend. `Documents/LaTeX/KernelMathematics.tex` is the live math reference; append a section per new kernel.
+- **Docs:** `PLAN.md` is the live plan. Update its "Status" table as phases complete. Don't write new planning files alongside it; amend. LaTeX docs in `Documents/LaTeX/` — one per phase.
 - **Public ship discipline:** each phase ends with a real public artifact. Two consecutive Sundays without a ship → stop building, write up what exists.
 - **No emojis in commit messages or markdown** unless explicitly requested.
 
@@ -192,4 +233,4 @@ These are baked into `Dockerfile.gsplat` already; just so you don't waste time:
 
 ## Open questions (deferred decisions)
 
-See `PLAN.md` → "Open questions". Most relevant near-term: the Phase 2 second-source choice (default = (c) second photogrammetry capture with different coord convention). Decide before Phase 1 ships.
+See `PLAN.md` → "Open questions". Phase 2 source decision resolved: option (c), second photogrammetry capture with different coordinate convention.
