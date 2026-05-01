@@ -172,6 +172,7 @@ TARGET_LINK_LIBRARIES(RenderOrbit
   Core
   HeterosplatKernels
   IO
+  Normalize
   Training
   )
 

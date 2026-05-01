@@ -6,8 +6,11 @@
 #include "Kernels/Heterosplat/ProjectionEWA3DGSFused.h"
 #include "Kernels/Heterosplat/RasterizeToPixels3DGS.h"
 #include "Kernels/Heterosplat/SphericalHarmonics.h"
+#include "Normalize/Convention.h"
+#include "Normalize/Transform.h"
 #include "Training/Activations.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -280,12 +283,31 @@ void render_frame(
 
 int main(int argc, char** argv)
 {
+  // Strip the optional `--up auto|y-up|z-up` flag out of argv before the
+  // existing positional parsing runs.
+  std::string up_str {"auto"};
+  std::vector<char*> argv_filtered;
+  argv_filtered.reserve(argc);
+  for (int i = 0; i < argc; ++i)
+  {
+    const std::string arg {argv[i]};
+    if (arg == "--up" && i + 1 < argc)
+    {
+      up_str = argv[++i];
+      continue;
+    }
+    argv_filtered.push_back(argv[i]);
+  }
+  argc = static_cast<int>(argv_filtered.size());
+  argv = argv_filtered.data();
+
   if (argc < 2)
   {
     std::cerr << "Usage: " << argv[0]
               << " <input.ply>"
               << " [output_dir] [num_frames] [image_width] [image_height]"
-              << " [orbit_radius] [elevation_deg] [fov_deg]\n";
+              << " [orbit_radius] [elevation_deg] [fov_deg]"
+              << " [--up auto|y-up|z-up]\n";
     return 1;
   }
 
@@ -301,7 +323,7 @@ int main(int argc, char** argv)
 
   // Load PLY
   std::cout << "Loading " << ply_path << "...\n";
-  const auto gaussians {IO::read_gaussians_ply(ply_path)};
+  auto gaussians {IO::read_gaussians_ply(ply_path)};
   const std::uint32_t N {gaussians.num_gaussians};
   const std::uint32_t K {
     (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1)};
@@ -309,32 +331,103 @@ int main(int argc, char** argv)
   std::cout << "  " << N << " Gaussians, SH degree " << gaussians.sh_degree
             << " (K=" << K << ")\n";
 
-  // Compute scene centroid and auto-radius
-  float cx {0.0f}, cy {0.0f}, cz {0.0f};
+  // Upload Gaussians to GPU. Means / quats / log-scales are uploaded up front
+  // because we may rotate them in-place via Normalize::launch_apply_similarity_
+  // transform before computing centroid + radius for the orbit camera.
+  GpuBuffer<float> d_means(N * 3);
+  GpuBuffer<float> d_quats(N * 4);
+  GpuBuffer<float> d_log_scales(N * 3);
+  GpuBuffer<float> d_sh_coeffs(N * K * 3);
+  GpuBuffer<float> d_logit_opacities(N);
+  GpuBuffer<float> d_actual_scales(N * 3);
+  GpuBuffer<float> d_actual_opacities(N);
+
+  d_means.upload(gaussians.means);
+  d_quats.upload(gaussians.quats);
+  d_log_scales.upload(gaussians.scales);
+  d_sh_coeffs.upload(gaussians.sh_coeffs);
+  d_logit_opacities.upload(gaussians.opacities);
+
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+
+  // Detect scene up-axis (or take CLI override). The orbit camera below
+  // hardcodes world up = +Z, so any Y-up scene (Inria 3DGS / OpenGL / Blender
+  // exports) renders sideways unless we rotate it first. The auto detector's
+  // variance-ratio test is conservative (requires the smallest-variance axis
+  // to be < 50% of the next-smallest); for borderline scenes pass --up y-up
+  // / --up z-up to force.
+  const auto up_conv {
+    Normalize::parse_convention_string(up_str, gaussians.means.data(), N)};
+  const auto up_axis {up_conv.up_axis};
+  const char* up_label {
+    up_axis == Normalize::UpAxis::y_up ? "Y-up" :
+    up_axis == Normalize::UpAxis::z_up ? "Z-up" : "unknown"};
+  std::cout << "  Up axis (" << up_str << "): " << up_label << "\n";
+
+  if (up_axis == Normalize::UpAxis::y_up)
+  {
+    const auto R {Normalize::rotation_to_z_up(up_axis)};
+    GpuBuffer<float> d_R(9);
+    GpuBuffer<float> d_t(3);
+    cudaMemcpyAsync(
+      d_R.ptr, R.data(), 9 * sizeof(float), cudaMemcpyHostToDevice, stream);
+    d_t.zero();
+    Normalize::launch_apply_similarity_transform(
+      N, d_R.ptr, 1.0f, d_t.ptr,
+      d_means.ptr, d_quats.ptr, d_log_scales.ptr, stream);
+    cudaStreamSynchronize(stream);
+
+    // Pull rotated means back so the host-side centroid + radius scan below
+    // operates on the Z-up scene the orbit camera will actually see. (SH
+    // coefficients are NOT rotated — proper rotation requires Wigner D
+    // matrices; view-dependent appearance will be slightly off.)
+    gaussians.means = d_means.download();
+    std::cout << "  Rotated scene to Z-up.\n";
+  }
+
+  // Robust scene center + radius: use median per axis and 90th-percentile
+  // distance to that center. Trained 3DGS scenes routinely have a long tail
+  // of low-opacity flyaway splats far from the real geometry — the mean
+  // centroid drifts toward them and the max distance is dominated by them,
+  // so the auto orbit radius would shoot past the actual scene.
+  std::vector<float> xs(N), ys(N), zs(N);
   for (std::uint32_t n = 0; n < N; ++n)
   {
-    cx += gaussians.means[n * 3 + 0];
-    cy += gaussians.means[n * 3 + 1];
-    cz += gaussians.means[n * 3 + 2];
+    xs[n] = gaussians.means[n * 3 + 0];
+    ys[n] = gaussians.means[n * 3 + 1];
+    zs[n] = gaussians.means[n * 3 + 2];
   }
-  cx /= N; cy /= N; cz /= N;
+  const auto median = [](std::vector<float>& v) {
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return v[v.size() / 2];
+  };
+  const float cx {median(xs)};
+  const float cy {median(ys)};
+  const float cz {median(zs)};
 
-  float max_dist {0.0f};
+  std::vector<float> dists(N);
   for (std::uint32_t n = 0; n < N; ++n)
   {
     const float dx {gaussians.means[n * 3 + 0] - cx};
     const float dy {gaussians.means[n * 3 + 1] - cy};
     const float dz {gaussians.means[n * 3 + 2] - cz};
-    max_dist = std::max(max_dist, std::sqrt(dx*dx + dy*dy + dz*dz));
+    dists[n] = std::sqrt(dx*dx + dy*dy + dz*dz);
   }
+  const std::size_t pct90_idx {static_cast<std::size_t>(0.90f * (N - 1))};
+  std::nth_element(dists.begin(), dists.begin() + pct90_idx, dists.end());
+  const float scene_radius {dists[pct90_idx]};
+  const float max_dist {*std::max_element(dists.begin(), dists.end())};
 
   const float orbit_radius {
-    argc >= 7 ? std::atof(argv[6]) : max_dist * 2.5f};
+    argc >= 7 ? std::atof(argv[6]) : scene_radius * 2.5f};
   const float elevation_deg {
     argc >= 8 ? std::atof(argv[7]) : 30.0f};
 
-  std::cout << "  Centroid: (" << cx << ", " << cy << ", " << cz << ")\n"
-            << "  Max radius: " << max_dist
+  std::cout << "  Centroid (median): (" << cx << ", " << cy << ", " << cz
+            << ")\n"
+            << "  Scene radius (90%): " << scene_radius
+            << " (max: " << max_dist << ")"
             << ", orbit radius: " << orbit_radius
             << ", elevation: " << elevation_deg << "°\n"
             << "  FOV: " << fov_deg << "°, "
@@ -352,26 +445,6 @@ int main(int argc, char** argv)
     fx, 0.0f, cx_img,
     0.0f, fy, cy_img,
     0.0f, 0.0f, 1.0f};
-
-  // Upload Gaussians to GPU
-  GpuBuffer<float> d_means(N * 3);
-  GpuBuffer<float> d_quats(N * 4);
-  GpuBuffer<float> d_sh_coeffs(N * K * 3);
-  GpuBuffer<float> d_actual_scales(N * 3);
-  GpuBuffer<float> d_actual_opacities(N);
-
-  d_means.upload(gaussians.means);
-  d_quats.upload(gaussians.quats);
-  d_sh_coeffs.upload(gaussians.sh_coeffs);
-
-  // Apply activations: PLY stores log-scale and logit-opacity
-  GpuBuffer<float> d_log_scales(N * 3);
-  GpuBuffer<float> d_logit_opacities(N);
-  d_log_scales.upload(gaussians.scales);
-  d_logit_opacities.upload(gaussians.opacities);
-
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
 
   Training::launch_exp_forward(
     N * 3, d_log_scales.ptr, d_actual_scales.ptr, stream);
