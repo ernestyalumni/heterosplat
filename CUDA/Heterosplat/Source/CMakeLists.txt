@@ -94,6 +94,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 ################################################################################
+## Phase 3 viewer dependencies (found before subdirectories so Viewer/
+## CMakeLists.txt can see the imported targets)
+################################################################################
+
+FIND_PACKAGE(OpenGL REQUIRED)
+FIND_PACKAGE(GLEW REQUIRED)
+
+################################################################################
 ## Sub-modules
 ################################################################################
 
@@ -103,6 +111,7 @@ ADD_SUBDIRECTORY(IO)
 ADD_SUBDIRECTORY(Kernels)
 ADD_SUBDIRECTORY(Normalize)
 ADD_SUBDIRECTORY(Training)
+ADD_SUBDIRECTORY(Viewer)
 ADD_SUBDIRECTORY(UnitTests)
 
 ################################################################################
@@ -189,6 +198,35 @@ TARGET_LINK_LIBRARIES(NormalizeAndFuse
   )
 
 SET_TARGET_PROPERTIES(NormalizeAndFuse
+  PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")
+
+################################################################################
+## SplatViewer — Phase 3 binary.
+## GLFW + Dear ImGui interactive viewer with live Gaussian splat rendering.
+## Per-source transform widget (translate/rotate/scale) at interactive rates.
+## Includes second custom kernel: colormap_per_axis_kernel for debug
+## visualization of coordinate axes.
+################################################################################
+
+ADD_EXECUTABLE(SplatViewer
+  Viewer/SplatViewer.cu
+  )
+
+TARGET_LINK_LIBRARIES(SplatViewer
+  PRIVATE
+  ColormapDebug
+  Core
+  HeterosplatKernels
+  IO
+  Normalize
+  Training
+  ImGui
+  OpenGL::GL
+  )
+
+SET_TARGET_PROPERTIES(SplatViewer
   PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/")

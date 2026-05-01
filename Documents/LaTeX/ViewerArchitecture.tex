@@ -1,0 +1,166 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage[final]{microtype}
+
+\title{heterosplat: Viewer Architecture}
+\author{Source: \texttt{repos/heterosplat/Documents/LaTeX/ViewerArchitecture.tex}}
+\date{\today}
+
+\newcommand{\R}{\mathbb{R}}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This document describes the architecture and rendering pipeline of the
+\textbf{SplatViewer} (Phase~3 of heterosplat). The viewer provides an
+interactive GLFW + Dear~ImGui interface for viewing and transforming
+3D Gaussian splats at interactive frame rates.
+
+\paragraph{Source files.}
+\begin{itemize}
+  \item \texttt{Source/Viewer/SplatViewer.cu} --- main viewer binary (GLFW
+        window, ImGui panels, render loop, camera controls).
+  \item \texttt{Source/Viewer/ColormapDebug.h} / \texttt{ColormapDebug.cu} ---
+        second custom CUDA kernel: per-axis colormap for debug visualization.
+  \item \texttt{Source/Viewer/CMakeLists.txt} --- builds ImGui (FetchContent)
+        and ColormapDebug library.
+\end{itemize}
+
+\section{Rendering pipeline per frame}
+
+Each frame executes the full forward rasterization pipeline on the GPU:
+
+\begin{enumerate}
+  \item \textbf{Transform.} Copy original Gaussian parameters to working
+        buffers. Apply the user's similarity transform (rotation +
+        scale + translation) via \texttt{apply\_similarity\_transform\_kernel}
+        from the Normalize module.
+
+  \item \textbf{Activate.} Convert log-scales to actual scales via
+        \texttt{exp\_forward} (opacities are activated once at load time
+        since they don't change with the transform widget).
+
+  \item \textbf{View directions.} Compute per-Gaussian view directions
+        from camera position to mean positions.
+
+  \item \textbf{Projection.} Run EWA 3DGS fused projection to compute
+        2D means, depths, conics, and bounding radii.
+
+  \item \textbf{Spherical harmonics.} Evaluate SH coefficients with view
+        directions to produce per-Gaussian RGB colors.
+
+  \item \textbf{Tile intersection (two-pass).}
+        Pass~1: count intersections per tile.
+        CUB inclusive prefix sum to get cumulative tile counts.
+        Pass~2: write intersection IDs and flatten IDs.
+        CUB radix sort by tile+depth.
+
+  \item \textbf{Tile offsets.} Compute per-tile start offsets into the
+        sorted intersection array.
+
+  \item \textbf{Rasterize.} Alpha-composite sorted Gaussians per tile
+        to produce the final RGB image.
+
+  \item \textbf{Display.} Download the CUDA render buffer to host memory,
+        upload to an OpenGL texture via \texttt{glTexSubImage2D}, and draw
+        a fullscreen quad.
+\end{enumerate}
+
+\section{Camera model}
+
+The viewer uses an orbit camera parameterized by:
+\begin{itemize}
+  \item \textbf{Center point} $(c_x, c_y, c_z)$ --- the look-at target.
+  \item \textbf{Azimuth} $\theta$ --- horizontal angle (degrees).
+  \item \textbf{Elevation} $\phi$ --- vertical angle (degrees), clamped to
+        $(-89°, 89°)$.
+  \item \textbf{Radius} $r$ --- distance from center.
+  \item \textbf{FOV} --- vertical field of view (degrees).
+\end{itemize}
+
+Camera position in world space:
+\begin{equation}
+  \mathbf{p}_\text{cam} = \mathbf{c} +
+  r \begin{pmatrix}
+    \cos\phi\,\cos\theta \\
+    \cos\phi\,\sin\theta \\
+    \sin\phi
+  \end{pmatrix}.
+\end{equation}
+
+The view matrix is constructed using a Z-up look-at convention
+(matching COLMAP) with the camera's Y-axis pointing downward in screen
+space.
+
+\paragraph{Controls.}
+\begin{itemize}
+  \item Left-drag: orbit (azimuth + elevation).
+  \item Right-drag: pan (translate center).
+  \item Scroll wheel: zoom (scale radius).
+\end{itemize}
+
+\section{Transform widget}
+
+The ImGui ``Transform'' panel exposes per-source:
+\begin{itemize}
+  \item Translation $\mathbf{t} \in \R^3$ (sliders, range $[-5, 5]$).
+  \item Rotation $(\alpha, \beta, \gamma)$ in degrees, applied as
+        $R = R_z(\gamma)\,R_y(\beta)\,R_x(\alpha)$.
+  \item Uniform scale $s$ (slider, range $[0.1, 5.0]$).
+\end{itemize}
+
+A ``Reset'' button returns all transform parameters to identity.
+
+\section{Colormap debug kernel}
+\label{sec:colormap}
+
+The \texttt{colormap\_per\_axis\_kernel} is the second custom CUDA kernel
+in heterosplat (the first being \texttt{apply\_similarity\_transform\_kernel}
+from Phase~2).
+
+Given a selected coordinate axis $a \in \{X, Y, Z\}$ and the scene's
+bounding box $[\min_a, \max_a]$, the kernel maps each Gaussian's position
+along that axis to a normalized parameter $t \in [0, 1]$:
+\begin{equation}
+  t_n = \frac{x_{n,a} - \min_a}{\max_a - \min_a}.
+\end{equation}
+
+This parameter is then mapped through a piecewise-linear approximation
+of the Turbo colormap, producing an RGB color $(r, g, b)$. The color is
+written to the Gaussian's SH DC coefficient as:
+\begin{equation}
+  c_{\text{DC}} = \frac{(r, g, b)}{C_0},
+  \qquad
+  C_0 = \frac{1}{2\sqrt{\pi}} \approx 0.28209.
+\end{equation}
+
+Higher-order SH coefficients ($\ell \geq 1$) are zeroed so that the
+colormap is view-independent.
+
+\paragraph{Use case.} Toggle the ``Colormap by axis'' checkbox in the
+Debug panel to visualize how Gaussians are distributed along each
+coordinate axis. This is useful for verifying coordinate convention
+alignment when fusing multiple sources.
+
+\section{Dependencies}
+
+\begin{center}
+\begin{tabular}{ll}
+  \textbf{Library} & \textbf{Version / source} \\
+  \hline
+  GLFW & 3.3.6 (system \texttt{libglfw3-dev}) \\
+  GLEW & 2.2.0 (system \texttt{libglew-dev}) \\
+  Dear ImGui & v1.91.8 (CMake FetchContent) \\
+  OpenGL & Core profile 3.3 \\
+\end{tabular}
+\end{center}
+
+\end{document}

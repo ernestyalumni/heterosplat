@@ -209,7 +209,7 @@ Each phase MUST end with a public artifact before the next begins. No "build eve
 | 0b — Torch-free launchers | ✅ Done 2026-04-29 | All 6 kernels + CUB glue + ForwardBackwardSmokeTest (1k Gaussians, fwd+bwd) |
 | 1 — Single-source train + render | 🔧 In progress | — |
 | 2 — Heterogeneous + normalization + 1st custom kernel | ✅ Done 2026-04-30 | NormalizeAndFuse binary, LaTeX |
-| 3 — Viewer + 2nd custom kernel | 🔧 In progress | — |
+| 3 — Viewer + 2nd custom kernel | ✅ Done 2026-04-30 | SplatViewer binary, LaTeX |
 
 ### Phase 0b sub-status (2026-04-29)
 
@@ -240,6 +240,25 @@ Total tests: 61 (`./build/Check`), all passing on RTX 3070 Laptop GPU (sm_86). L
 
 Total tests: 78 (`./build/Check`), all passing.
 
+### Phase 3 sub-status (2026-04-30)
+
+| Component | Status | Notes |
+|---|---|---|
+| GLFW window + OpenGL 3.3 core | ✅ Done | System GLFW 3.3.6 + GLEW 2.2.0 |
+| Dear ImGui integration | ✅ Done | FetchContent v1.91.8, GLFW+OpenGL3 backends |
+| Orbit camera controls | ✅ Done | Left-drag orbit, right-drag pan, scroll zoom |
+| Transform widget (ImGui) | ✅ Done | Translation/rotation/scale sliders + reset |
+| Live similarity transform | ✅ Done | Per-frame copy + transform + activate |
+| Full render pipeline per frame | ✅ Done | projection → SH → intersect → sort → rasterize |
+| CUDA → GL texture display | ✅ Done | Download to host + glTexSubImage2D |
+| Second custom kernel | ✅ Done | `colormap_per_axis_kernel` — turbo colormap of coordinate axes |
+| Debug panel | ✅ Done | Colormap toggle + axis selector |
+| Window resize handling | ✅ Done | Reallocates render buffers on framebuffer resize |
+| Unit tests | ✅ Done | 6 new ColormapDebug tests, 84 total passing |
+| LaTeX documentation | ✅ Done | `Documents/LaTeX/ViewerArchitecture.tex` (3 pages) |
+
+Total tests: 84 (`./build/Check`), all passing.
+
 `ForwardBackwardSmokeTest` binary chains all 6 kernels + CUB prefix sum + CUB radix sort into a single fwd+bwd pass on 1024 synthetic Gaussians (64x64 render, 16px tiles). Verifies finite non-zero gradients propagate through the full pipeline. CUB wrappers live in `Core/CubOperations.{h,cu}`.
 
 ### Phase 1 sub-status (2026-04-29)
@@ -265,6 +284,8 @@ Total tests: 78 (`./build/Check`), all passing.
 - `repos/heterosplat/README.md` — project thesis.
 - `repos/heterosplat/AGENTS.md` — entry point for AI agents (Claude / OpenClaw / Codex).
 - `repos/heterosplat/Documents/LaTeX/KernelMathematics.tex` — math reference (one section per kernel).
+- `repos/heterosplat/Documents/LaTeX/NormalizationMathematics.tex` — Phase 2 normalization math (similarity transforms, quaternion composition, convention detection).
+- `repos/heterosplat/Documents/LaTeX/ViewerArchitecture.tex` — Phase 3 viewer pipeline, camera model, colormap kernel.
 - `repos/heterosplat/Scripts/run_container.sh` / `run_tests.sh` / `CaptureGsplatOracle.py` — dev wrappers.
 - `repos/heterosplat/CUDA/Heterosplat/Source/UnitTests/Fixtures/` — captured gsplat-Python oracle outputs (raw float32).
 - `repos/Galvatron/Documents/WorldLabs/MASTER-PLAN.md` — interview cycle.

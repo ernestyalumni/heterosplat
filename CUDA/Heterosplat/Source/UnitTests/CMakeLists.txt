@@ -22,6 +22,7 @@ ADD_EXECUTABLE(Check
   Training/AdamOptimizer_tests.cu
   Training/ImageLoss_tests.cu
   Training/TrainSmokeTest.cu
+  Viewer/ColormapDebug_tests.cu
   )
 
 # Tests that load oracle fixtures need an absolute path to Fixtures/ baked
@@ -39,6 +40,7 @@ TARGET_INCLUDE_DIRECTORIES(Check
 TARGET_LINK_LIBRARIES(Check
   PRIVATE
   Colmap
+  ColormapDebug
   Core
   HeterosplatKernels
   IO
