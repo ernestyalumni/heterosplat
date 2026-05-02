@@ -204,7 +204,8 @@ struct GaussianModel
 void initialize_from_colmap(
   GaussianModel& model,
   const std::vector<Colmap::Point3D>& points,
-  const std::uint32_t max_sh_degree)
+  const std::uint32_t max_sh_degree,
+  float& scene_radius_90)
 {
   const std::uint32_t N {static_cast<std::uint32_t>(points.size())};
   model.allocate(N, max_sh_degree);
@@ -220,22 +221,12 @@ void initialize_from_colmap(
   constexpr float C0 {0.28209479177387814f};
   constexpr float initial_logit_opacity {-2.1972246f}; // logit(0.1)
 
-  float min_x {1e30f}, min_y {1e30f}, min_z {1e30f};
-  float max_x {-1e30f}, max_y {-1e30f}, max_z {-1e30f};
-
   for (std::uint32_t n = 0; n < N; ++n)
   {
     const auto& p {points[n]};
     h_means[n * 3 + 0] = static_cast<float>(p.position[0]);
     h_means[n * 3 + 1] = static_cast<float>(p.position[1]);
     h_means[n * 3 + 2] = static_cast<float>(p.position[2]);
-
-    min_x = std::min(min_x, h_means[n * 3 + 0]);
-    min_y = std::min(min_y, h_means[n * 3 + 1]);
-    min_z = std::min(min_z, h_means[n * 3 + 2]);
-    max_x = std::max(max_x, h_means[n * 3 + 0]);
-    max_y = std::max(max_y, h_means[n * 3 + 1]);
-    max_z = std::max(max_z, h_means[n * 3 + 2]);
 
     h_quats[n * 4 + 0] = 1.0f;
     h_quats[n * 4 + 1] = 0.0f;
@@ -250,17 +241,49 @@ void initialize_from_colmap(
     h_logit_opacities[n] = initial_logit_opacity;
   }
 
-  // Scale initialization: average spacing from bounding box.
-  // Use max extent / cbrt(N) to handle degenerate (coplanar) point clouds.
-  const float extent_x {max_x - min_x};
-  const float extent_y {max_y - min_y};
-  const float extent_z {max_z - min_z};
-  const float max_extent {std::max({extent_x, extent_y, extent_z, 1e-6f})};
-  const float avg_spacing {max_extent / std::cbrt(static_cast<float>(N))};
-  const float initial_log_scale {std::log(std::max(avg_spacing * 0.5f, 1e-6f))};
+  // Robust scene-extent: median centroid + 90th-percentile distance, mirroring
+  // RenderOrbit. COLMAP sparse clouds routinely have outlier points an order of
+  // magnitude past the real scene; using bbox max-extent collapsed initial
+  // Gaussian scales to ~10x the correct value, producing a uniform fuzzy ball
+  // that the trainer could not climb out of.
+  std::vector<float> xs(N), ys(N), zs(N);
+  for (std::uint32_t n = 0; n < N; ++n)
+  {
+    xs[n] = h_means[n * 3 + 0];
+    ys[n] = h_means[n * 3 + 1];
+    zs[n] = h_means[n * 3 + 2];
+  }
+  const auto median = [](std::vector<float>& v) {
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return v[v.size() / 2];
+  };
+  const float cx {median(xs)};
+  const float cy {median(ys)};
+  const float cz {median(zs)};
 
-  std::cout << "  Scene extents: [" << extent_x << ", " << extent_y << ", "
-            << extent_z << "], avg spacing: " << avg_spacing
+  std::vector<float> dists(N);
+  for (std::uint32_t n = 0; n < N; ++n)
+  {
+    const float dx {h_means[n * 3 + 0] - cx};
+    const float dy {h_means[n * 3 + 1] - cy};
+    const float dz {h_means[n * 3 + 2] - cz};
+    dists[n] = std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  const std::size_t pct90_idx {
+    static_cast<std::size_t>(0.90f * (N - 1))};
+  std::nth_element(dists.begin(), dists.begin() + pct90_idx, dists.end());
+  scene_radius_90 = std::max(dists[pct90_idx], 1e-6f);
+
+  // Average point spacing assuming N points uniformly fill a sphere of radius
+  // scene_radius_90. Half that spacing makes a sensible isotropic init.
+  const float effective_extent {2.0f * scene_radius_90};
+  const float avg_spacing {
+    effective_extent / std::cbrt(static_cast<float>(N))};
+  const float initial_log_scale {
+    std::log(std::max(avg_spacing * 0.5f, 1e-6f))};
+
+  std::cout << "  Scene radius (90%): " << scene_radius_90
+            << ", avg spacing: " << avg_spacing
             << ", initial scale: " << std::exp(initial_log_scale) << "\n";
 
   for (std::uint32_t n = 0; n < N; ++n)
@@ -336,6 +359,11 @@ struct TrainBuffers
   GpuBuffer<float> v_depths;
   GpuBuffer<float> v_sh_coeffs;
 
+  // Persistent per-iter scratch (cudaMalloc inside the train_step hot loop
+  // serializes the stream and was costing ~10% of throughput).
+  GpuBuffer<float> d_viewmat;
+  GpuBuffer<float> d_K;
+
   std::size_t isect_capacity {0};
 
   void allocate(
@@ -382,6 +410,9 @@ struct TrainBuffers
     v_depths = GpuBuffer<float>(N);
     v_sh_coeffs = GpuBuffer<float>(N * K * 3);
 
+    d_viewmat = GpuBuffer<float>(16);
+    d_K = GpuBuffer<float>(9);
+
     isect_capacity = 0;
   }
 
@@ -420,12 +451,10 @@ float train_step(
   const std::uint32_t tile_h {(image_h + tile_size - 1) / tile_size};
   const std::uint32_t n_pixels {image_w * image_h};
 
-  // Upload viewmat + K
-  GpuBuffer<float> d_viewmat(16);
-  GpuBuffer<float> d_K(9);
-  cudaMemcpyAsync(d_viewmat.ptr, h_viewmat, 16 * sizeof(float),
+  // Upload viewmat + K to persistent scratch in TrainBuffers
+  cudaMemcpyAsync(bufs.d_viewmat.ptr, h_viewmat, 16 * sizeof(float),
     cudaMemcpyHostToDevice, stream);
-  cudaMemcpyAsync(d_K.ptr, h_K, 9 * sizeof(float),
+  cudaMemcpyAsync(bufs.d_K.ptr, h_K, 9 * sizeof(float),
     cudaMemcpyHostToDevice, stream);
 
   // Upload GT image
@@ -451,7 +480,7 @@ float train_step(
     B, C, N,
     model.means.ptr, nullptr, model.quats.ptr, model.actual_scales.ptr,
     nullptr,
-    d_viewmat.ptr, d_K.ptr,
+    bufs.d_viewmat.ptr, bufs.d_K.ptr,
     image_w, image_h,
     cfg.eps2d, cfg.near_plane, cfg.far_plane, 0.0f, 0,
     bufs.radii.ptr, bufs.means2d.ptr, bufs.depths.ptr, bufs.conics.ptr,
@@ -574,7 +603,7 @@ float train_step(
   Kernels::Heterosplat::launch_projection_ewa_3dgs_fused_backward(
     B, C, N,
     model.means.ptr, nullptr, model.quats.ptr, model.actual_scales.ptr,
-    d_viewmat.ptr, d_K.ptr,
+    bufs.d_viewmat.ptr, bufs.d_K.ptr,
     image_w, image_h, cfg.eps2d, 0,
     bufs.radii.ptr, bufs.conics.ptr, nullptr,
     bufs.v_means2d.ptr, bufs.v_depths.ptr, bufs.v_conics.ptr, nullptr,
@@ -764,7 +793,15 @@ int main(int argc, char** argv)
             << " points...\n";
 
   GaussianModel model;
-  initialize_from_colmap(model, points, cfg.sh_degree_max);
+  float scene_radius_90 {0.0f};
+  initialize_from_colmap(model, points, cfg.sh_degree_max, scene_radius_90);
+
+  // Inria 3DGS convention: means lr is specified in normalized units and
+  // scaled by scene radius so step size is invariant to scene scale. Other
+  // lrs (sh, opacity, scales, quats) act on dimensionless quantities and
+  // don't need scaling.
+  cfg.lr_means *= scene_radius_90;
+  std::cout << "  lr_means scaled by scene radius: " << cfg.lr_means << "\n";
 
   // ---- Allocate training buffers ----
   std::uint32_t max_w {0}, max_h {0};
