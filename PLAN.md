@@ -271,9 +271,9 @@ Total tests: 84 (`./build/Check`), all passing.
 | Adam optimizer | ✅ Done | Per-element CUDA, bias-corrected moments |
 | L1 loss | ✅ Done | Shared-memory reduction fwd + sign gradient bwd |
 | Activation kernels | ✅ Done | sigmoid/exp fwd+bwd, quat normalize, view dirs |
-| TrainSingleScene binary | ✅ Done | Full fwd+loss+bwd+Adam loop, SH degree schedule |
+| TrainSingleScene binary | ✅ Code done; not validated end-to-end | Full fwd+loss+bwd+Adam loop, SH degree schedule. Has not yet been run to convergence on a real COLMAP scene — see AGENTS.md "Input pipeline status (orbit demo)". |
 | SSIM loss | Not started | Deferred — L1 sufficient for Phase 1 |
-| Orbit render | Not started | `--ply X --orbit out.mp4` with ffmpeg |
+| Orbit render | ✅ Done | `RenderOrbit` binary + `demo_orbit/orbit.mp4` (720 frames). Renders from `data/train_30000.ply`, an externally-sourced PLY whose lineage is **not** this repo's `TrainSingleScene` — closing that gap is the top Phase 4 priority. |
 | CLI frontend (CLI11) | Not started | Currently argv-based |
 | Densification | Not started | Out-of-scope for Phase 1 |
 

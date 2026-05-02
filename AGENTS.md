@@ -200,13 +200,29 @@ The audit trail at any point: vendored kernels in `Thirdparty/Gsplat/` carry the
 
 **Phases 0-3 are complete.** The core infrastructure — vendored kernels, training, normalization, fusion, and interactive viewer — is built and tested.
 
-**Next steps for Phase 4+ (gated on World Labs cycle):**
-- Test TrainSingleScene on real COLMAP data
+**Top priority: validate the input pipeline end-to-end.** See "Input pipeline status (orbit demo)" below — the current `demo_orbit/orbit.mp4` is rendered from a `data/train_30000.ply` of unrecorded provenance (almost certainly downloaded or trained externally in the gsplat-Python oracle container, not produced by `TrainSingleScene`). The renderer is proven; the trainer is not. Closing that gap (run `TrainSingleScene` on a real COLMAP scene, then orbit *that* `.ply`) is the highest-leverage next move because it lets the demo prove the full pipeline, not just the rasterizer.
+
+**Other Phase 4+ items (gated on World Labs cycle):**
 - Add CLI11 unified frontend (single `heterosplat` binary with subcommands)
 - Add SSIM loss alongside L1
 - Record demo video for public ship
 - Add densification (split/clone/prune)
 - CUDA-GL interop (replace memcpy with mapped buffer for viewer perf)
+
+### Input pipeline status (orbit demo)
+
+The orbit demo's input is a single PLY consumed by `RenderOrbit`:
+
+- **Demo binary:** `CUDA/Heterosplat/Source/RenderOrbit.cu`. Argv: `<input.ply> [out_dir] [frames] [w] [h] [radius] [elevation_deg] [fov_deg] [--up auto|y-up|z-up]`. Renders a cinematic orbit (azimuth pans 0→360°, elevation bobs ±15° twice per orbit), writes per-frame PNGs, stitches via `ffmpeg`.
+- **PLY reader:** `IO::read_gaussians_ply()` in `CUDA/Heterosplat/Source/IO/PlyReader.{h,cpp}` → `IO::GaussianData` (means, sh_coeffs, log-scales, logit-opacities, quats — raw training space; `RenderOrbit` applies `exp` / `sigmoid` host-side before render).
+- **Current input file:** `data/train_30000.ply` (~266 MB, ~1.07 M Gaussians, SH degree 3). Filename matches the Inria/gsplat 30k-iteration checkpoint convention. **Not produced by this repo's `TrainSingleScene`** — no COLMAP scene is checked in next to it, and `data/` is gitignored. Treat its provenance as "external" until re-derived.
+- **Three ways to (re)generate the input** — in order of portfolio value for the World Labs cycle:
+  1. **`TrainSingleScene` end-to-end** (`./TrainSingleScene <colmap_sparse> <images_dir> [out.ply] [iters]`). Requires a COLMAP `sparse/0` + images dir. MipNeRF360 scenes (garden, bicycle, kitchen, ...) ship a COLMAP reconstruction directly — easiest path. **This is the top-priority next step.** It validates the trainer and produces a `.ply` whose lineage is 100% C++/CUDA from this repo.
+  2. **gsplat-Python in the oracle container** (`heterosplat:26.02-py3`). Fast and known-good but adds zero portfolio signal — Mildenhall has seen it.
+  3. **Download a pretrained Inria/gsplat PLY** (likely how `data/train_30000.ply` got there). Fine as a renderer-only sanity input; weak as a demo story.
+- **Once trained-from-our-trainer PLY exists,** re-record `demo_orbit/orbit.mp4` against it and update `demo_orbit/script.txt` to assert "trained by this repo's CUDA training loop" instead of just "rendered."
+
+When resuming this thread: confirm `data/train_30000.ply` provenance with the user before recommending action. If it was indeed downloaded, the immediate task is to acquire a COLMAP scene (MipNeRF360 is the standard) and run `TrainSingleScene` to convergence (~30k iters, checkpoints every 7000).
 
 ## Conventions
 
